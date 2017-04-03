@@ -34,6 +34,7 @@
 #define MAXDATA 256             // maximum length of a data line
 #define SENDER_BUFSIZ 512       // sender thread buffer size
 #define DATADIR "/tmp/tm_data/"
+#define INPUTDIR DATADIR "i/"
 #define TMPMASK "/tmp/tmtmp.XXXXXX"
 #define LOGF "/tmp/tm.log"
 #define MAXAGE 3600             // data will be removed after MAXAGE seconds if not refreshed
@@ -55,6 +56,8 @@
 #define WTFMSG "WTF"
 #define IPLEN (4*3+3)           // max length of decimal coded ip address
 #define IDLEN (8)
+#define SNLEN (4)
+#define FNAMLEN (IDLEN+SNLEN)
   
 #define ROLE_READER 0
 #define ROLE_VOTER  1
@@ -567,7 +570,7 @@ static void close_udp(int *sd, struct ev_loop *l, ev_io *w)
 static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
 {
   char pdu[BUF_SIZE];
-  char nam[sizeof(DATADIR)+IDLEN+4];
+  char nam[sizeof(DATADIR)+FNAMLEN];
   char age[]="0000";
   char *p;
   int c,len,a;
@@ -600,7 +603,7 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
       {
         while((e=readdir(d)))
         {
-          if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.')
+          if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
           {
             strcpy(nam,DATADIR);
             strcat(nam,e->d_name);
@@ -754,7 +757,7 @@ static void close_tcp(int *sd, struct ev_loop *l, ev_io *w)
 
 static int delete_old(int maxage)
 {
-  char nam[sizeof(DATADIR)+IDLEN+4];
+  char nam[sizeof(DATADIR)+FNAMLEN];
   time_t now;
   DIR *d;
   struct dirent *e;
@@ -764,7 +767,7 @@ static int delete_old(int maxage)
   {
     while((e=readdir(d)))
     {
-      if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.')
+      if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
       {
         strcpy(nam,DATADIR);
         strcat(nam,e->d_name);
@@ -964,6 +967,35 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
 }
 
 
+static int forward_sensor_input(const char *nam, const char *buf)
+{
+  int ret=-1;
+  char fwdip[IPLEN+1];
+  int mlen;
+  char *msg;
+  const char *n;
+  
+  if(NULL!=buf&&NULL!=nam)
+  {
+    if(strcmp(leaderip,ip_self)==0) strcpy(fwdip,"127.0.0.1");
+    else strcpy(fwdip,leaderip);
+    //printf("leaderip: %s\nip_self: %s\nfwdip: %s\n",leaderip,ip_self,fwdip);
+    mlen=strlen(buf)+strlen(nam)+3+4+IDLEN+1+1;
+    if(NULL!=(msg=malloc(mlen)))
+    {
+      if(buf[2]==GL_1&&buf[3]==GL_2) n=GLOBALID;
+      else n=nodeid;
+      snprintf(msg,mlen,"+a 0000%s%s%s",nam,n,buf);
+      printf("fwd to %s: '%s'\n",fwdip,msg);
+      ret=sender_add(T_TCP,fwdip,INPUTPORT,msg);
+      free(msg);
+    }
+  }
+    
+  return(ret);
+}
+
+
 // #aTM0014.1
 // 01234567890
 // #    - fwd
@@ -973,10 +1005,8 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
 static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents)
 {
   char buf[BUF_SIZE];
+  char sn[SNLEN+1]={0};
   ssize_t len=-1;
-  int mlen;
-  char *msg,*n;
-  char fwdip[IPLEN+1];
 
   if(!(EV_ERROR&revents))
   {
@@ -984,7 +1014,7 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
     if(len>0)
     {
       buf[len]='\0';
-      printf("%s: %s\n",__func__,buf);
+      //printf("%s: %s\n",__func__,buf);
       if(strncmp("quit",buf,4)==0)
       {
         quit=1;
@@ -992,20 +1022,8 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
       }
       else if(buf[0]=='#')
       {
-        // forward req
-        if(strcmp(leaderip,ip_self)==0) strcpy(fwdip,"127.0.0.1");
-        else strcpy(fwdip,leaderip);
-        printf("leaderip: %s\nip_self: %s\nfwdip: %s\n",leaderip,ip_self,fwdip);
-        mlen=strlen(buf)+4+IDLEN+1+1;
-        if(NULL!=(msg=malloc(mlen)))
-        {
-          if(buf[2]==GL_1&&buf[3]==GL_2) n=GLOBALID;
-          else n=nodeid;
-          snprintf(msg,mlen,"+a 0000%c%c%c%c%s%s",buf[2],buf[3],buf[4],buf[5],n,&buf[6]);
-          printf("fwd to %s: '%s'\n",fwdip,msg);
-          sender_add(T_TCP,fwdip,INPUTPORT,msg);
-          free(msg);
-        }
+        strncpy(sn,&buf[2],SNLEN);
+        forward_sensor_input(sn,&buf[6]);
       }
     }
     else if(len<0) fprintf(stderr,"read error\n");
@@ -1017,6 +1035,44 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
     ev_io_stop(loop,w);
     close(w->fd);
     free(w);
+  }
+}
+
+
+static void input_dir_cb(struct ev_loop *loop, struct ev_stat *w, int revents)
+{
+  DIR *d;
+  struct dirent *e;
+  char nam[sizeof(INPUTDIR)+SNLEN];
+  char buf[BUF_SIZE];
+  int len;
+  FILE *f;
+
+  if(!(EV_ERROR&revents)&&w->attr.st_nlink)
+  {
+    // scan dir for files, process and delete them
+    if(NULL!=(d=opendir(INPUTDIR)))
+    {
+      while((e=readdir(d)))
+      {
+        if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=SNLEN)
+        {
+          strcpy(nam,INPUTDIR);
+          strcat(nam,e->d_name);
+          if(NULL!=(f=fopen(nam,"rb")))
+          {
+            len=fread(buf,1,BUF_SIZE,f);
+            fclose(f);
+            if(len>0)
+            {
+              buf[len]='\0';
+              if(0==forward_sensor_input(e->d_name,buf)) file_delete_add(nam);
+            }
+          }
+        }
+      }
+      closedir(d);
+    }
   }
 }
 
@@ -1136,6 +1192,7 @@ int main(void)
   pthread_t pt;
   pthread_t ptf;
   char hostname[32]={0};
+  ev_stat finput;
 
   primary_ip(ip_self,sizeof(ip_self));
   bzero(nodeid,sizeof(nodeid));
@@ -1153,7 +1210,16 @@ int main(void)
       exit(1);
     }
   }
-  
+
+  if(access(INPUTDIR,R_OK|W_OK|X_OK)==-1)
+  {
+    if(0!=mkdir(INPUTDIR,0730))
+    {
+      fprintf(stderr,"inputdir '%s' missing and unable to create\n",INPUTDIR);
+      exit(1);
+    }
+  }
+
   if(0!=pipe(pfdss))
   {
     fprintf(stderr,"pipe error 1\n");
@@ -1186,6 +1252,9 @@ int main(void)
   init_udp(&udp_bus_sd,loop,&udp_bus_watcher,BUSPORT,udp_bus_cb);               // listen to broadcast udp bus
   init_udp(&udp_input_sd,loop,&udp_input_watcher,INPUTPORT,udp_input_cb);       // listen udp input port for voting <-- maybe remove and move to bus?
   
+  ev_stat_init(&finput,input_dir_cb,INPUTDIR,0.);
+  ev_stat_start(loop,&finput);
+
   ev_init(&timeout_watcher,timeout_cb);
   
   ev_init(&heartbeat_watcher,heartbeat_cb);
