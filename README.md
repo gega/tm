@@ -1,6 +1,37 @@
 # tm
 semi-real time telemetry data sharing
 
-dependency: libev
+## environment
+- libev
+- unix like os
+- every node on the same network
 
-**nothing to see here move along**
+## overview
+The purpose of the system is to share current data in the network like temperature, music volume and other relatively small sensor data. All of the data in the system can be found in a tmp directory in the filesystem. The system keep that directory up to date. Every sensor data has a file in the directory and the filename contains information regarding the sensor type, sensor id and source node. The file modification time set to the data creation time. After a certain time all not updated data files are removed.
+
+## details
+
+
+### data filename structure
+- Sensor type (2char)
+- Sensor instance (2char)
+- Source node id or "xxx..." if the data is global (8char)
+
+### Sensor Data Content
+One line of ascii text.
+
+### Sensor Input
+Local sensors can feed data to the system in one of two ways:
+- Writing a file to the "input" directory, where the filename should be the sensor type and instance and the content should be the measurements
+- Sending the measurement to the tcp input port to localhost (name, content)
+
+### misc
+
+| name             | value
+| ---------------- | --------------- |
+| data directory   | /tmp/tm_data    |
+| input directory  | /tmp/tm_data/in |
+| local input port | 7698            |
+
+### Disclaimer
+_This is not a hard real time system and shouldn't be used for critical and urgent data. The typical delivery time is ~0.5-1sec but there are no guarantees of data consistency and delivery times in this implementation nor in the supported underlying operating system._
