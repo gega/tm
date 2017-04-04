@@ -34,7 +34,7 @@
 #define MAXDATA 256             // maximum length of a data line
 #define SENDER_BUFSIZ 512       // sender thread buffer size
 #define DATADIR "/tmp/tm_data/"
-#define INPUTDIR DATADIR "i/"
+#define INPUTDIR DATADIR "in/"
 #define TMPMASK "/tmp/tmtmp.XXXXXX"
 #define LOGF "/tmp/tm.log"
 #define MAXAGE 3600             // data will be removed after MAXAGE seconds if not refreshed
@@ -235,7 +235,6 @@ static void *sender_thread(void *p)
   {
     st=1;
     l=read(fd,buf,sizeof(buf));
-    //printf("  senderth: read \"%s\"\n", buf);
     if(mode==0)
     {
       if(buf[0]=='q') break;
@@ -869,11 +868,10 @@ static void udp_input_cb(struct ev_loop *loop, ev_io *w, int revents)
     if(len>0)
     {
       buf[len]='\0';
-      if(buf[0]=='!')
+      if(buf[0]=='!'&&buf[1]==PV)
       {
         if(getrank(nodeid)<getrank(&buf[2]))
         {
-          printf("%s: voting lost\n",__func__);
           role=ROLE_READER;
           ev_break(EV_A_ EVBREAK_ONE);
         }
@@ -895,7 +893,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
   socklen_t len;
 
   len=recvfrom(w->fd,buf,sizeof(buf)-1,0,(struct sockaddr*)&addr,(socklen_t *)&addr_len);
-  if(len>0)
+  if(len>0&&buf[1]==PV)
   {
     buf[len-1]='\0';
     if(role==ROLE_READER||role==ROLE_VOTER)
@@ -932,7 +930,6 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
           if(NULL!=(vote=malloc(votelen)))
           {
             snprintf(vote,votelen,"!%s,%s",&buf[1],nodeid);
-            printf("vote: '%s'\n",vote);
             sender_add(T_UDP,ADDR_BROADCAST,INPUTPORT,vote);
             free(vote);
             lastvoted=now;
@@ -979,14 +976,12 @@ static int forward_sensor_input(const char *nam, const char *buf)
   {
     if(strcmp(leaderip,ip_self)==0) strcpy(fwdip,"127.0.0.1");
     else strcpy(fwdip,leaderip);
-    //printf("leaderip: %s\nip_self: %s\nfwdip: %s\n",leaderip,ip_self,fwdip);
     mlen=strlen(buf)+strlen(nam)+3+4+IDLEN+1+1;
     if(NULL!=(msg=malloc(mlen)))
     {
       if(buf[2]==GL_1&&buf[3]==GL_2) n=GLOBALID;
       else n=nodeid;
-      snprintf(msg,mlen,"+a 0000%s%s%s",nam,n,buf);
-      printf("fwd to %s: '%s'\n",fwdip,msg);
+      snprintf(msg,mlen,"+%c 0000%s%s%s",PV,nam,n,buf);
       ret=sender_add(T_TCP,fwdip,INPUTPORT,msg);
       free(msg);
     }
@@ -1014,13 +1009,12 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
     if(len>0)
     {
       buf[len]='\0';
-      //printf("%s: %s\n",__func__,buf);
       if(strncmp("quit",buf,4)==0)
       {
         quit=1;
         ev_break(EV_A_ EVBREAK_ONE);
       }
-      else if(buf[0]=='#')
+      else if(buf[0]=='#'&&buf[1]==PV)
       {
         strncpy(sn,&buf[2],SNLEN);
         forward_sensor_input(sn,&buf[6]);
@@ -1090,7 +1084,7 @@ static void read_tcp_input_cb(struct ev_loop *loop, struct ev_io *w, int revents
       if(len>0)
       {
         buf[len]='\0';
-        if(buf[0]=='+') process_line(&buf[2],0);
+        if(buf[0]=='+'&&buf[1]==PV) process_line(&buf[2],0);
         else if(strncmp(buf,WTFMSG,sizeof(WTFMSG)-1)==0)
         {
           fprintf(stderr,"WTF --> reader\n");
@@ -1178,11 +1172,11 @@ static int getmachash(void)
 
 
 /* TODO:
- *  inotify iface:
- *   - datadir/input <-- notify
- *   - handle files created in that dir as local sensor inputs
  *  demonize
  *  cfg file
+ *  remove old files --> move to file io thread
+ *  input_dir_cb --> move dir scan to file io thread (forward_* needs a variation with local send)
+ *
  */
 int main(void)
 {
