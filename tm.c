@@ -21,10 +21,15 @@
 #include <limits.h>
 #include <net/if.h> 
 #include <sys/ioctl.h>
+#ifdef __linux__
 #include <linux/if_link.h>
+#endif
 #include <netdb.h>
 #include <sys/resource.h>
-
+#ifdef __APPLE__
+#include <net/if.h>
+#include <net/if_dl.h>
+#endif
 
 
 #define STR(s) #s
@@ -498,7 +503,12 @@ static int getfileage(const char *n, time_t now)
     if(0==lstat(n,&st))
     {
       if(now==0) now=time(NULL);
+      #ifdef __APPLE
+      ret=difftime(now,st.st_mtimespec.tv_sec);
+      #endif
+      #ifdef __linux__
       ret=difftime(now,st.st_mtim.tv_sec);
+      #endif
     }
   }
   
@@ -1129,6 +1139,7 @@ static int bogomips(void)
 }
 
 
+#ifdef __linux__
 static int getmachash(void)
 {
   int ret=0;
@@ -1169,7 +1180,61 @@ static int getmachash(void)
 
   return(ret);
 }
+#endif
 
+
+#ifdef __APPLE__
+// http://stackoverflow.com/questions/3964494/having-a-problem-figuring-out-how-to-get-ethernet-interface-info-on-mac-os-x-usi#4267204
+static int getmachash(void)
+{
+  int ret=0;
+  struct ifaddrs *if_addrs = NULL;
+  struct ifaddrs *if_addr = NULL;
+  void *tmp = NULL;
+  unsigned long long macaddress=0,m;
+  char macstr[]="-" XSTR(LONG_LONG_MAX);
+  int i;
+
+  if (0 == getifaddrs(&if_addrs)) {
+    for (if_addr = if_addrs; if_addr != NULL; if_addr = if_addr->ifa_next) {
+      // Address
+      if (if_addr->ifa_addr->sa_family == AF_INET) {
+        tmp = &((struct sockaddr_in *)if_addr->ifa_addr)->sin_addr;
+      } else {
+        tmp = &((struct sockaddr_in6 *)if_addr->ifa_addr)->sin6_addr;
+      }
+      // Mask
+      if (if_addr->ifa_netmask != NULL) {
+        if (if_addr->ifa_netmask->sa_family == AF_INET) {
+          tmp = &((struct sockaddr_in *)if_addr->ifa_netmask)->sin_addr;
+        } else {
+          tmp = &((struct sockaddr_in6 *)if_addr->ifa_netmask)->sin6_addr;
+        }
+      }
+      // MAC address
+      if (if_addr->ifa_addr != NULL && if_addr->ifa_addr->sa_family == AF_LINK) {
+        struct sockaddr_dl* sdl = (struct sockaddr_dl *)if_addr->ifa_addr;
+        unsigned char mac[6];
+        if (6 == sdl->sdl_alen) {
+          memcpy(mac, LLADDR(sdl), sdl->sdl_alen);
+          for(m=i=0;i<6;i++)
+          {
+            m|=mac[i]&0xff;
+            m<<=8;
+          }
+          if(m>macaddress) macaddress=m;
+        }
+      }
+    }
+    freeifaddrs(if_addrs);
+    if_addrs = NULL;
+  }
+  snprintf(macstr,sizeof(macstr),"%llud",macaddress);
+  ret=hash(macstr,72421);
+
+  return(ret);
+}
+#endif
 
 /* TODO:
  *  demonize
