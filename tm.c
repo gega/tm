@@ -979,7 +979,8 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
             strncpy(votedfor,&buf[2],IDLEN);
             votedforpwr=getrank(&buf[2]);
           }
-        } 
+        }
+        if(role==ROLE_READER) ev_break(EV_A_ EVBREAK_ONE); // switch to voting mode
       }
       delete_old(MAXAGE);
     }
@@ -1341,6 +1342,7 @@ static void daemonize(void)     // from http://www.enderunix.org/documents/eng/d
  *  input_dir_cb --> move dir scan to file io thread (forward_* needs a variation with local send)
  *
  * DONE:
+ *  switch to voter mode if vote related traffic detected in reader mode
  *  nodeid: change to hash+hostname only (hash= add all mac addresses as 64bit int and get 101 hash)
  *  power value: 24bit value 6chars: daemon uptime/8h, speed related byte, nodeid first byte
  *               this should goes to GL00 sensor data and used during voting
