@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <sys/types.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <pthread.h>
@@ -35,42 +36,41 @@
 #define STR(s) #s
 #define XSTR(s) STR(s)
 
-#define BUF_SIZE 4096           // bufsize (must be > IPLEN + IDLEN*2 + 16 )
-#define MAXDATA 256             // maximum length of a data line
-#define SENDER_BUFSIZ 512       // sender thread buffer size
+#define BUF_SIZE 4096                 // bufsize (must be > IPLEN + IDLEN*2 + 16 )
+#define MAXDATA 256                   // maximum length of a data line
+#define SENDER_BUFSIZ 512             // sender thread buffer size
 #define DATADIR "/tmp/tm_data/"
 #define INPUTDIR DATADIR "in/"
 #define TMPMASK "/tmp/tmtmp.XXXXXX"
 #define LOGF "/tmp/tm.log"
-#define MAXAGE 3600             // data will be removed after MAXAGE seconds if not refreshed
-#define BUSPORT 7697            // broadcast bus port
-#define INPUTPORT 7698          // leader sensor input tcp port and vote input udp port
-#define LOCALPORT 7699          // local sensor input fwd-ed to LEADER_IP:INPUTPORT
-
-#define PV 'a'                  // protocol version
-#define BUSTMO 20               // minimum timeout for bus inactivity and start voting session
-#define VOTETMO 20              // voting timeout
-#define HEARTBEAT 1             // 4 leader sequences in every HEARTBEAT seconds
+#define MAXAGE 3600                   // data will be removed after MAXAGE seconds if not refreshed
+#define BUSPORT 7697                  // broadcast bus port
+#define INPUTPORT 7698                // leader sensor input tcp port and vote input udp port
+#define LOCALPORT 7699                // local sensor input fwd-ed to LEADER_IP:INPUTPORT
+#define HBCNT_MAX (INT_MAX-1)         // max value of hb count
+#define PV 'b'                        // protocol version
+#define HEARTBEAT 1000                // 4 leader sequences in every HEARTBEAT ms
+#define VOTEHB 150                    // voting heartbeat in ms
+#define BUSTMO ((HEARTBEAT*5)/1000)   // minimum timeout in secs for bus inactivity and start voting session
+#define VOTETMO ((VOTEHB*20)/1000)    // voting timeout in secs
 #define GL_1 'G'
 #define GL_2 'L'
 #define GLOBALID "xxxxxxxx"
-#define GLDATA "GL00" GLOBALID  // master data name (leader ip and id)
+#define GLDATA "GL00" GLOBALID        // master data name (leader ip and id)
 #define T_UDP 'u'
 #define T_TCP 't'
 #define ADDR_BROADCAST "255.255.255.255"
 #define WTFMSG "WTF"
-#define IPLEN (4*3+3)           // max length of decimal coded ip address
+#define IPLEN (4*3+3)                 // max length of decimal coded ip address
 #define IDLEN (8)
 #define SNLEN (4)
+#define PWRLEN (6)                    // length of "power" string
 #define FNAMLEN (IDLEN+SNLEN)
-  
+#define LOCK_FILE "/tmp/tm.lock"
+   
 #define ROLE_READER 0
 #define ROLE_VOTER  1
 #define ROLE_LEADER 2
-
-
-
-static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents);
 
 
 
@@ -89,11 +89,15 @@ static int pipef=-1;
 static int role=ROLE_READER;
 static char nodeid[IDLEN+1]="0000host";   // <POWER><HOSTNAME> (8bytes)
 static char ip_self[IPLEN+1];             // own ip address facing to default gateway
+static char pwr_self[PWRLEN+1];
 static char leaderid[IDLEN+1];
 static char leaderip[IPLEN+1];
+static int leaderpwr=0;
 static char prevleaderid[IDLEN+1];
 static char prevleaderip[IPLEN+1];
+static int prevleaderpwr;
 static int quit=0;
+static int numhb=0;
 
 static int udp_input_sd=-1;
 static int udp_bus_sd=-1;
@@ -516,16 +520,33 @@ static int getfileage(const char *n, time_t now)
 }
 
 
+static int getrank(const char *pwr)
+{
+  int ret=-1;
+  char r[]="000000";
+
+  if(pwr!=NULL)
+  {
+    strncpy(r,pwr,6);
+    ret=(int)strtol(r,NULL,16);
+  }
+  
+  return(ret);
+}
+
+
 static void set_leader(char *nam)
 {
   FILE *f;
   
   if(nam!=NULL&&NULL!=(f=fopen(nam,"w")))
   {
-    // 10.0.1.7,ff6abana
-    fprintf(f,"%s,%s",ip_self,nodeid);
+    // 6634ff,ff6abana,10.0.1.7
+    // pppppp,nnnnnnnn,ipipipipip...
+    fprintf(f,"%s,%s,%s",pwr_self,nodeid,ip_self);
     fclose(f);
   }
+  leaderpwr=getrank(pwr_self);
   strcpy(leaderip,ip_self);
   strcpy(leaderid,nodeid);
 }
@@ -576,6 +597,14 @@ static void close_udp(int *sd, struct ev_loop *l, ev_io *w)
 }
 
 
+static void updatepwr(char *p)
+{
+  char v[]="00";
+  snprintf(v,sizeof(v),"%02x",(numhb/3600>0xff?0xff:numhb/3600));
+  if(p) { p[0]=v[0]; p[1]=v[1]; }
+}
+
+
 static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
 {
   char pdu[BUF_SIZE];
@@ -589,8 +618,8 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
   {
     if(role==ROLE_VOTER)
     {
-      // send voting request "?a<NODEID>,<IP>"
-      snprintf(pdu,sizeof(pdu),"?%c%s,%s",PV,nodeid,ip_self);
+      // send voting request "?b<6PWR>,<8NODEID>,<?IP>"
+      snprintf(pdu,sizeof(pdu),"?%c%s,%s,%s",PV,pwr_self,nodeid,ip_self);
       if(pdu[0]!='\0') sender_add(T_UDP,ADDR_BROADCAST,BUSPORT,pdu);
     }
     else if(role==ROLE_LEADER)
@@ -601,6 +630,8 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
       DIR *d;
       struct dirent *e;
       
+      if(++numhb>=HBCNT_MAX) numhb=HBCNT_MAX;
+      updatepwr(pwr_self);
       set_leader(DATADIR GLDATA);
       pdu[0]='+';
       pdu[1]=PV;
@@ -814,17 +845,25 @@ static int process_item(char *s, int dry)
     ret=0;
     if(strcmp(n,GLDATA)==0)
     {
-      char *lid;
+      char *lid,*ip;
+      // pppppp,nnnnnnnn,<ip>
+      // 01234567890123456
       if(NULL!=(lid=strchr(d,',')))
       {
         *lid++='\0';
-        if(strlen(d)<=IPLEN&&strcmp(leaderip,d)!=0)
+        if(NULL!=(ip=strchr(lid,',')))
         {
-          ret=1;
-          strcpy(prevleaderip,leaderip);
-          strcpy(prevleaderid,leaderid);
-          strcpy(leaderip,d);
-          if(strlen(lid)<=IDLEN) strcpy(leaderid,lid);
+          *ip++='\0';
+          if(strlen(ip)<=IPLEN&&strcmp(leaderip,ip)!=0&&strlen(lid)<=IDLEN)
+          {
+            ret=1;
+            prevleaderpwr=leaderpwr;
+            leaderpwr=getrank(d);
+            strcpy(prevleaderip,leaderip);
+            strcpy(prevleaderid,leaderid);
+            strcpy(leaderip,ip);
+            strcpy(leaderid,lid);
+          }
         }
       }
     }
@@ -850,21 +889,6 @@ static int process_line(char *buf, int dry)
 }
 
 
-static int getrank(const char *nid)
-{
-  int ret=-1;
-  char r[]="0000";
-
-  if(nid!=NULL)
-  {
-    strncpy(r,nid,4);
-    ret=(int)strtol(r,NULL,16);
-  }
-  
-  return(ret);
-}
-
-
 static void udp_input_cb(struct ev_loop *loop, ev_io *w, int revents)
 {
   char buf[BUF_SIZE];
@@ -880,7 +904,7 @@ static void udp_input_cb(struct ev_loop *loop, ev_io *w, int revents)
       buf[len]='\0';
       if(buf[0]=='!'&&buf[1]==PV)
       {
-        if(getrank(nodeid)<getrank(&buf[2]))
+        if(getrank(pwr_self)<getrank(&buf[2]))
         {
           role=ROLE_READER;
           ev_break(EV_A_ EVBREAK_ONE);
@@ -896,6 +920,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
   static time_t lasthb=0;
   static time_t lastvoted=0;
   static char votedfor[IDLEN+1]={0};
+  static int votedforpwr=0;
   time_t now;
   char buf[BUF_SIZE];
   struct sockaddr_in addr;
@@ -910,6 +935,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
     {
       if(role==ROLE_READER) ev_timer_again(loop,&timeout_watcher);
       now=time(NULL);
+      if(++numhb>=HBCNT_MAX) numhb=HBCNT_MAX;
       if(buf[0]=='+')          // data (aka heartbeat)
       {
         if(process_line(&buf[2],0)>0)
@@ -919,19 +945,23 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
           {
             // double leaders, send WTF to the weaker
             char wtfip[IPLEN+1];
-            if(getrank(prevleaderid)>getrank(leaderid)) strcpy(wtfip,prevleaderip);
+            if(prevleaderpwr>leaderpwr) strcpy(wtfip,prevleaderip);
             else strcpy(wtfip,leaderip);
             sender_add(T_TCP,wtfip,INPUTPORT,WTFMSG);
           }
         }
         lasthb=now;
       }
-      else if(buf[0]=='?')     // voting request
+      else if(buf[0]=='?')
       {
+        // voting request "?b<6PWR>,<8NODEID>,<?IP>"
+        //                 ?bpppppp,NNNNNNNN,<IP>
+        //                           11111
+        //                 012345678901234...
         int voteage=difftime(now,lastvoted);
         if(       voteage>VOTETMO
-            || (  voteage<VOTETMO && strncmp(votedfor,&buf[2],sizeof(votedfor))==0 )
-            || ( (voteage<VOTETMO || lastvoted==0) && getrank(&buf[2])>getrank(votedfor) )
+            || (  voteage<VOTETMO && strncmp(votedfor,&buf[9],sizeof(votedfor))==0 )
+            || ( (voteage<VOTETMO || lastvoted==0) && getrank(&buf[2])>votedforpwr )
           )
         {
           int votelen;
@@ -945,6 +975,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
             lastvoted=now;
             bzero(votedfor,sizeof(votedfor));
             strncpy(votedfor,&buf[2],IDLEN);
+            votedforpwr=getrank(&buf[2]);
           }
         } 
       }
@@ -958,7 +989,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
         {
           // duplicated leaders detected, if we are the weaker, switch roles, otherwise send WTF
           char wtfip[IPLEN+1];
-          if(getrank(prevleaderid)<getrank(leaderid))
+          if(prevleaderpwr<leaderpwr)
           {
             strcpy(wtfip,leaderip);
             strcpy(leaderip,ip_self);
@@ -1236,14 +1267,51 @@ static int getmachash(void)
 }
 #endif
 
+
+static void daemonize(void)     // from http://www.enderunix.org/documents/eng/daemon.php
+{
+  int i,lfp;
+  char str[]="-" XSTR(LONG_MAX);
+
+  if(1==getppid()) return;                              // already a daemon
+  i=fork();
+  if(i<0) exit(1);                                      // fork error
+  if(i>0) exit(0);                                      // parent exits
+  // child (daemon) continues
+  setsid();                                             // obtain a new process group
+  for(i=getdtablesize();i>=0;--i) close(i);             // close all descriptors
+  i=open("/dev/null",O_RDWR);
+  if(-1==dup(i)) exit(1);
+  if(-1==dup(i)) exit(1);
+  umask(027);                                           // set newly created file permissions
+  lfp=open(LOCK_FILE,O_RDWR|O_CREAT,0640);
+  if(lfp<0) exit(1);                                    // can not open
+  if(lockf(lfp,F_TLOCK,0)<0) exit(0);                   // can not lock
+  // first instance continues
+  snprintf(str,sizeof(str),"%d\n",getpid());
+  if(-1==write(lfp,str,strlen(str))) exit(1);
+  signal(SIGCHLD,SIG_IGN);                              // ignore child
+  signal(SIGTSTP,SIG_IGN);                              // ignore tty signals
+  signal(SIGTTOU,SIG_IGN);
+  signal(SIGTTIN,SIG_IGN);
+}
+
+
 /* TODO:
- *  demonize
  *  cfg file
  *  remove old files --> move to file io thread
  *  input_dir_cb --> move dir scan to file io thread (forward_* needs a variation with local send)
  *
+ * DONE:
+ *  nodeid: change to hash+hostname only (hash= add all mac addresses as 64bit int and get 101 hash)
+ *  power value: 24bit value 6chars: daemon uptime/8h, speed related byte, nodeid first byte
+ *               this should goes to GL00 sensor data and used during voting
+ *  separate vote hb: vote hb now is the normal heartbeat (1sec) this should be separated and should
+ *                    be shorter (~1-200ms)
+ *  after vote hb: reduce votetmo
+ *
  */
-int main(void)
+int main(int argc, char **argv)
 {
   int pfdss[2];
   int pfdsf[2];
@@ -1252,18 +1320,39 @@ int main(void)
   pthread_t ptf;
   char hostname[32]={0};
   ev_stat finput;
+  int o,dmn=0,machash;
+  mode_t m;
+
+  while((o=getopt(argc,argv,"dh"))!=-1)
+  {
+    switch(o)
+    {
+      case 'd':
+        dmn=1;
+        break;
+      case 'h':
+      default:
+        fprintf(stderr,"Usage: %s [-d]\n",argv[0]);
+        exit(0);
+    }
+  }
+  
+  if(dmn!=0) daemonize();
 
   primary_ip(ip_self,sizeof(ip_self));
   bzero(nodeid,sizeof(nodeid));
   bogo=bogomips()/13;
-  snprintf(nodeid,sizeof(nodeid),"%02x%02x",bogo>255?255:bogo,(getmachash()&0xff));
+  machash=getmachash();
+  snprintf(pwr_self,sizeof(pwr_self),"00%02x%02x",bogo>0xff?0xff:bogo,machash&0xff);
+  snprintf(nodeid,sizeof(nodeid),"%04x",(machash&0xffff));
   if(gethostname(hostname,sizeof(hostname)-1)==0) strncat(nodeid,hostname,4);
   else strncat("NONE",hostname,4);
   srandom(getmachash()+hash(ip_self,7)+time(NULL));
 
+  m=umask(0);
   if(access(DATADIR,R_OK|W_OK|X_OK)==-1)
   {
-    if(0!=mkdir(DATADIR,0770))
+    if(0!=mkdir(DATADIR,0777))
     {
       fprintf(stderr,"datadir '%s' missing and unable to create\n",DATADIR);
       exit(1);
@@ -1272,12 +1361,13 @@ int main(void)
 
   if(access(INPUTDIR,R_OK|W_OK|X_OK)==-1)
   {
-    if(0!=mkdir(INPUTDIR,0730))
+    if(0!=mkdir(INPUTDIR,0733))
     {
       fprintf(stderr,"inputdir '%s' missing and unable to create\n",INPUTDIR);
       exit(1);
     }
   }
+  umask(m);
 
   if(0!=pipe(pfdss))
   {
@@ -1317,7 +1407,7 @@ int main(void)
   ev_init(&timeout_watcher,timeout_cb);
   
   ev_init(&heartbeat_watcher,heartbeat_cb);
-  heartbeat_watcher.repeat=HEARTBEAT;
+  heartbeat_watcher.repeat=HEARTBEAT/1000.0;
 
   quit=0;
   while(quit==0)
@@ -1325,19 +1415,24 @@ int main(void)
 
     fprintf(stderr,"ROLE_READER\n");
     role=ROLE_READER;
-    timeout_watcher.repeat=BUSTMO;//+(random()%15);
+    timeout_watcher.repeat=BUSTMO;
     ev_timer_again(loop,&timeout_watcher);
     ev_run(loop,0);
     
     if(quit!=0) break;
 
     fprintf(stderr,"ROLE_VOTER\n");
+    updatepwr(pwr_self);
     role=ROLE_VOTER;
+    usleep((random()%VOTEHB)*1000);
     timeout_watcher.repeat=VOTETMO;
     ev_timer_again(loop,&timeout_watcher);
+    heartbeat_watcher.repeat=VOTEHB/1000.0;
     ev_timer_again(loop,&heartbeat_watcher);
     ev_run(loop,0);
     ev_timer_stop(loop,&timeout_watcher);
+    heartbeat_watcher.repeat=HEARTBEAT/1000.0;
+    ev_timer_again(loop,&heartbeat_watcher);
 
     if(quit!=0) break;
 
