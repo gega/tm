@@ -31,6 +31,8 @@
 #include <net/if.h>
 #include <net/if_dl.h>
 #endif
+#include <fts.h>
+
 
 
 #define STR(s) #s
@@ -1268,6 +1270,42 @@ static int getmachash(void)
 #endif
 
 
+// http://stackoverflow.com/a/27808574
+static int recursive_delete(const char *dir)
+{
+  int ret=0;
+  FTS *ftsp=NULL;
+  FTSENT *curr;
+  char *files[]={ (char *) dir, NULL };
+
+  ftsp=fts_open(files, FTS_NOCHDIR | FTS_PHYSICAL | FTS_XDEV, NULL);
+  if(!ftsp) 
+  {
+    ret=-1;
+    goto finish;
+  }
+
+  while((curr=fts_read(ftsp)))
+  {
+    switch(curr->fts_info)
+    {
+      case FTS_DP:
+      case FTS_F:
+      case FTS_SL:
+      case FTS_SLNONE:
+      case FTS_DEFAULT:
+        if(remove(curr->fts_accpath)<0) ret=-1;
+        break;
+    }
+  }
+
+finish:
+    if(ftsp) fts_close(ftsp);
+
+    return(ret);
+}
+
+
 static void daemonize(void)     // from http://www.enderunix.org/documents/eng/daemon.php
 {
   int i,lfp;
@@ -1339,6 +1377,7 @@ int main(int argc, char **argv)
   
   if(dmn!=0) daemonize();
 
+  recursive_delete(DATADIR);
   primary_ip(ip_self,sizeof(ip_self));
   bzero(nodeid,sizeof(nodeid));
   bogo=bogomips()/13;
@@ -1358,7 +1397,6 @@ int main(int argc, char **argv)
       exit(1);
     }
   }
-
   if(access(INPUTDIR,R_OK|W_OK|X_OK)==-1)
   {
     if(0!=mkdir(INPUTDIR,0733))
