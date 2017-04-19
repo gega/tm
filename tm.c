@@ -41,10 +41,10 @@
 #define BUF_SIZE 4096                 // bufsize (must be > IPLEN + IDLEN*2 + 16 )
 #define MAXDATA 256                   // maximum length of a data line
 #define SENDER_BUFSIZ 512             // sender thread buffer size
-#define DATADIR "/tmp/tm_data/"
+#define DATADIR "/var/run/tm_data/"
 #define INPUTDIR DATADIR "in/"
-#define TMPMASK "/tmp/tmtmp.XXXXXX"
-#define LOGF "/tmp/tm.log"
+#define TMPDIR DATADIR "tmp/"
+#define TMPMASK TMPDIR "tmtmp.XXXXXX"
 #define MAXAGE 3600                   // data will be removed after MAXAGE seconds if not refreshed
 #define BUSPORT 7697                  // broadcast bus port
 #define INPUTPORT 7698                // leader sensor input tcp port and vote input udp port
@@ -68,8 +68,8 @@
 #define SNLEN (4)
 #define PWRLEN (6)                    // length of "power" string
 #define FNAMLEN (IDLEN+SNLEN)
-#define LOCK_FILE "/tmp/tm.lock"
-   
+#define LOCK_FILE "/var/lock/tm.lock"
+
 #define ROLE_READER 0
 #define ROLE_VOTER  1
 #define ROLE_LEADER 2
@@ -310,7 +310,7 @@ static int write_file(int age, const char *name, const char *str)
             tms.actime=tms.modtime=time(NULL)-age;
             if(0==utime(tmpnam,&tms))
             {
-              if(0==chmod(tmpnam,0666))
+              if(0==chmod(tmpnam,0644))
               {
                 if(0==rename(tmpnam,nam)) ret=0;
                 else fprintf(stderr,"%s: rename %s to %s failed\n",__func__,tmpnam,nam);
@@ -540,17 +540,26 @@ static int getrank(const char *pwr)
 static void set_leader(char *nam)
 {
   FILE *f;
+  int fd;
   
-  if(nam!=NULL&&NULL!=(f=fopen(nam,"w")))
+  if(nam!=NULL)
   {
-    // 6634ff,ff6abana,10.0.1.7
-    // pppppp,nnnnnnnn,ipipipipip...
-    fprintf(f,"%s,%s,%s",pwr_self,nodeid,ip_self);
-    fclose(f);
+    if(-1!=(fd=open(nam,O_TRUNC,0644)))
+    {
+      if(NULL!=(f=fdopen(fd,"w")))
+      {
+        // 6634ff,ff6abana,10.0.1.7
+        // pppppp,nnnnnnnn,ipipipipip...
+        fprintf(f,"%s,%s,%s",pwr_self,nodeid,ip_self);
+        fclose(f);
+      }
+      else close(fd);
+    }
   }
   leaderpwr=getrank(pwr_self);
   strcpy(leaderip,ip_self);
   strcpy(leaderid,nodeid);
+  
 }
 
 
@@ -1337,11 +1346,12 @@ static void daemonize(void)     // from http://www.enderunix.org/documents/eng/d
 
 
 /* TODO:
- *  cfg file
+ *  cfg file (datadir,logging)
  *  remove old files --> move to file io thread
  *  input_dir_cb --> move dir scan to file io thread (forward_* needs a variation with local send)
  *
  * DONE:
+ *  put DATADIR to /run
  *  switch to voter mode if vote related traffic detected in reader mode
  *  nodeid: change to hash+hostname only (hash= add all mac addresses as 64bit int and get 101 hash)
  *  power value: 24bit value 6chars: daemon uptime/8h, speed related byte, nodeid first byte
@@ -1379,7 +1389,7 @@ int main(int argc, char **argv)
   
   if(dmn!=0) daemonize();
 
-  recursive_delete(DATADIR);
+  recursive_delete(DATADIR INPUTDIR);
   primary_ip(ip_self,sizeof(ip_self));
   bzero(nodeid,sizeof(nodeid));
   bogo=bogomips()/13;
@@ -1393,7 +1403,7 @@ int main(int argc, char **argv)
   m=umask(0);
   if(access(DATADIR,R_OK|W_OK|X_OK)==-1)
   {
-    if(0!=mkdir(DATADIR,0777))
+    if(0!=mkdir(DATADIR,0755))
     {
       fprintf(stderr,"datadir '%s' missing and unable to create\n",DATADIR);
       exit(1);
@@ -1407,7 +1417,14 @@ int main(int argc, char **argv)
       exit(1);
     }
   }
-  umask(m);
+  if(access(TMPDIR,R_OK|W_OK|X_OK)==-1)
+  {
+    if(0!=mkdir(TMPDIR,0700))
+    {
+      fprintf(stderr,"tmpdir '%s' missing and unable to create\n",TMPDIR);
+      exit(1);
+    }
+  }
 
   if(0!=pipe(pfdss))
   {
@@ -1498,6 +1515,8 @@ int main(int argc, char **argv)
   close_tcp(&tcp_input_sd,loop,&tcp_input_watcher);
   close_tcp(&tcp_local_sd,loop,&tcp_local_watcher);
   close_udp(&udp_bus_sd,loop,&udp_bus_watcher);
+
+  umask(m);
 
   return(0);
 }
