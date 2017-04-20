@@ -24,6 +24,7 @@
 #include <sys/ioctl.h>
 #ifdef __linux__
 #include <linux/if_link.h>
+#include <sys/prctl.h>
 #endif
 #include <netdb.h>
 #include <sys/resource.h>
@@ -48,6 +49,12 @@
 #endif
 #ifndef TM_LOCKFILE
 #define TM_LOCKFILE "/var/lock/tm.lock"
+#endif
+#ifndef TM_DEFAULT_UID
+#define TM_DEFAULT_UID 1000
+#endif
+#ifndef TM_DEFAULT_GID
+#define TM_DEFAULT_GID TM_DEFAULT_UID
 #endif
 
 // CONFIG AREA END
@@ -256,7 +263,8 @@ static void *sender_thread(void *p)
   char *ip,*msg,*n;
   int port,len,mode=0,l,st;
 
-  setpriority(PRIO_PROCESS,0,1);
+  setpriority(PRIO_PROCESS,0,-8);
+  prctl(PR_SET_KEEPCAPS,1,0,0,0);
   while(1)
   {
     st=1;
@@ -307,7 +315,8 @@ static int write_file(int age, const char *name, const char *str)
   char tmpnam[]=TMPMASK;
   struct utimbuf tms;
   
-  setpriority(PRIO_PROCESS,0,2);
+  setpriority(PRIO_PROCESS,0,-9);
+  prctl(PR_SET_KEEPCAPS,1,0,0,0);
   if(name!=NULL)
   {
     if(NULL!=(nam=malloc(sizeof(TM_DATADIR)+strlen(name)+1)))
@@ -554,22 +563,13 @@ static int getrank(const char *pwr)
 
 static void set_leader(char *nam)
 {
-  FILE *f;
-  int fd;
+  char str[PWRLEN+IDLEN+IPLEN+2+1];
   
   if(nam!=NULL)
   {
-    if(-1!=(fd=open(nam,O_TRUNC,0644)))
-    {
-      if(NULL!=(f=fdopen(fd,"w")))
-      {
-        // 6634ff,ff6abana,10.0.1.7
-        // pppppp,nnnnnnnn,ipipipipip...
-        fprintf(f,"%s,%s,%s",pwr_self,nodeid,ip_self);
-        fclose(f);
-      }
-      else close(fd);
-    }
+    // 6634ff,ff6abana,10.0.1.7
+    snprintf(str,sizeof(str),"%s,%s,%s",pwr_self,nodeid,ip_self);
+    file_create_add(0,nam,str);
   }
   leaderpwr=getrank(pwr_self);
   strcpy(leaderip,ip_self);
@@ -1387,21 +1387,37 @@ int main(int argc, char **argv)
   ev_stat finput;
   int o,dmn=0,machash;
   mode_t m;
+  gid_t gid;
+  uid_t uid;
 
-  while((o=getopt(argc,argv,"dh"))!=-1)
+  uid=TM_DEFAULT_UID;
+  gid=TM_DEFAULT_GID;
+  while((o=getopt(argc,argv,"dhu:g:"))!=-1)
   {
     switch(o)
     {
+      case 'u':
+        uid=atoi(optarg);
+        break;
+      case 'g':
+        gid=atoi(optarg);
+        break;
       case 'd':
         dmn=1;
         break;
       case 'h':
       default:
-        fprintf(stderr,"Usage: %s [-d]\n",argv[0]);
+        fprintf(stderr,"semi-realtime telemetry\n(c) Gergely Gati 2017 AGPL\nusage: %s [-d] [-u uid] [-g gid]\n",argv[0]);
         exit(0);
     }
   }
   
+  if(getuid()!=0)
+  {
+    fprintf(stderr,"run as root\n");
+    exit(1);
+  }
+
   if(dmn!=0) daemonize();
 
   recursive_delete(TM_DATADIR INPUTDIR);
@@ -1467,6 +1483,23 @@ int main(int argc, char **argv)
   {
     fprintf(stderr,"error creating thread for file io!\n");
     exit(1);
+  }
+
+  setpriority(PRIO_PROCESS,0,-10);
+
+  if(getuid()==0)
+  {
+    prctl(PR_SET_KEEPCAPS,1,0,0,0);
+    if(setgid(gid)!=0)
+    {
+      fprintf(stderr,"cannot set gid\n");
+      exit(1);
+    }
+    if(setuid(uid)!=0)
+    {
+      fprintf(stderr,"cannot set uid\n");
+      exit(0);
+    }
   }
 
   init_tcp(&tcp_local_sd,loop,&tcp_local_watcher,LOCALPORT,read_tcp_local_cb);  // listen on local tcp input port for local sensor data
