@@ -7,7 +7,7 @@ semi-real time telemetry data sharing
 - every node on the same network
 
 ## overview
-The purpose of the system is to share current data in the network like temperature, music volume and other relatively small sensor data. All of the data in the system can be found in a tmp directory in the filesystem. The system keep that directory up to date. Every sensor data has a file in the directory and the filename contains information regarding the sensor type, sensor id and source node. The file modification time set to the data creation time. After a certain time all not updated data files are removed.
+The purpose of the system is to share current data in the network like temperature, music volume and other relatively small sensor data. All of the data in the system can be found in a directory in the filesystem (TM_DATADIR). The system keep this directory up to date. Every sensor data is a file in the directory. The filename contains information regarding the sensor type, sensor id and source node. The file modification time set to the data creation time. After a certain time (TM_MAXAGE) all not updated data files are removed.
 
 ## details
 
