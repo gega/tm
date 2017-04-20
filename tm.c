@@ -35,17 +35,33 @@
 
 
 
+// CONFIG AREA BEGIN
+
+#ifndef TM_BUFSIZE
+#define TM_BUFSIZE 4096               // bufsize (must be > MAXDATA )
+#endif
+#ifndef TM_DATADIR
+#define TM_DATADIR "/var/run/tm_data/"
+#endif
+#ifndef TM_MAXAGE
+#define TM_MAXAGE 3600                // data will be removed after TM_MAXAGE seconds if not refreshed
+#endif
+#ifndef TM_LOCKFILE
+#define TM_LOCKFILE "/var/lock/tm.lock"
+#endif
+
+// CONFIG AREA END
+
+
+
 #define STR(s) #s
 #define XSTR(s) STR(s)
 
-#define BUF_SIZE 4096                 // bufsize (must be > IPLEN + IDLEN*2 + 16 )
 #define MAXDATA 256                   // maximum length of a data line
 #define SENDER_BUFSIZ 512             // sender thread buffer size
-#define DATADIR "/var/run/tm_data/"
-#define INPUTDIR DATADIR "in/"
-#define TMPDIR DATADIR "tmp/"
+#define INPUTDIR TM_DATADIR "in/"
+#define TMPDIR TM_DATADIR "tmp/"
 #define TMPMASK TMPDIR "tmtmp.XXXXXX"
-#define MAXAGE 3600                   // data will be removed after MAXAGE seconds if not refreshed
 #define BUSPORT 7697                  // broadcast bus port
 #define INPUTPORT 7698                // leader sensor input tcp port and vote input udp port
 #define LOCALPORT 7699                // local sensor input fwd-ed to LEADER_IP:INPUTPORT
@@ -68,7 +84,6 @@
 #define SNLEN (4)
 #define PWRLEN (6)                    // length of "power" string
 #define FNAMLEN (IDLEN+SNLEN)
-#define LOCK_FILE "/var/lock/tm.lock"
 
 #define ROLE_READER 0
 #define ROLE_VOTER  1
@@ -295,9 +310,9 @@ static int write_file(int age, const char *name, const char *str)
   setpriority(PRIO_PROCESS,0,2);
   if(name!=NULL)
   {
-    if(NULL!=(nam=malloc(sizeof(DATADIR)+strlen(name)+1)))
+    if(NULL!=(nam=malloc(sizeof(TM_DATADIR)+strlen(name)+1)))
     {
-      strcpy(nam,DATADIR);
+      strcpy(nam,TM_DATADIR);
       strcat(nam,name);
       if(str!=NULL)
       {
@@ -618,8 +633,8 @@ static void updatepwr(char *p)
 
 static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
 {
-  char pdu[BUF_SIZE];
-  char nam[sizeof(DATADIR)+FNAMLEN];
+  char pdu[TM_BUFSIZE];
+  char nam[sizeof(TM_DATADIR)+FNAMLEN];
   char age[]="0000";
   char *p;
   int c,len,a;
@@ -643,20 +658,20 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
       
       if(++numhb>=HBCNT_MAX) numhb=HBCNT_MAX;
       updatepwr(pwr_self);
-      set_leader(DATADIR GLDATA);
+      set_leader(TM_DATADIR GLDATA);
       pdu[0]='+';
       pdu[1]=PV;
       pdu[2]='\0';
       p=&pdu[2];
       len=sizeof(pdu)-3;
       now=time(NULL);
-      if(NULL!=(d=opendir(DATADIR)))
+      if(NULL!=(d=opendir(TM_DATADIR)))
       {
         while((e=readdir(d)))
         {
           if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
           {
-            strcpy(nam,DATADIR);
+            strcpy(nam,TM_DATADIR);
             strcat(nam,e->d_name);
             if(len<IDLEN+4+1)
             {
@@ -664,7 +679,7 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
               continue;
             }
             a=getfileage(nam,now);
-            if(a>MAXAGE)
+            if(a>TM_MAXAGE)
             {
               file_delete_add(nam);
               continue;
@@ -808,19 +823,19 @@ static void close_tcp(int *sd, struct ev_loop *l, ev_io *w)
 
 static int delete_old(int maxage)
 {
-  char nam[sizeof(DATADIR)+FNAMLEN];
+  char nam[sizeof(TM_DATADIR)+FNAMLEN];
   time_t now;
   DIR *d;
   struct dirent *e;
 
   now=time(NULL);
-  if(NULL!=(d=opendir(DATADIR)))
+  if(NULL!=(d=opendir(TM_DATADIR)))
   {
     while((e=readdir(d)))
     {
       if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
       {
-        strcpy(nam,DATADIR);
+        strcpy(nam,TM_DATADIR);
         strcat(nam,e->d_name);
         if(getfileage(nam,now)>maxage) file_delete_add(nam);
       }
@@ -902,7 +917,7 @@ static int process_line(char *buf, int dry)
 
 static void udp_input_cb(struct ev_loop *loop, ev_io *w, int revents)
 {
-  char buf[BUF_SIZE];
+  char buf[TM_BUFSIZE];
   struct sockaddr_in addr;
   int addr_len=sizeof(addr);
   socklen_t len;
@@ -933,7 +948,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
   static char votedfor[IDLEN+1]={0};
   static int votedforpwr=0;
   time_t now;
-  char buf[BUF_SIZE];
+  char buf[TM_BUFSIZE];
   struct sockaddr_in addr;
   int addr_len=sizeof(addr);
   socklen_t len;
@@ -991,7 +1006,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
         }
         if(role==ROLE_READER) ev_break(EV_A_ EVBREAK_ONE); // switch to voting mode
       }
-      delete_old(MAXAGE);
+      delete_old(TM_MAXAGE);
     }
     else if(role==ROLE_LEADER)
     {
@@ -1052,13 +1067,13 @@ static int forward_sensor_input(const char *nam, const char *buf)
 // 14.1 - value
 static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents)
 {
-  char buf[BUF_SIZE];
+  char buf[TM_BUFSIZE];
   char sn[SNLEN+1]={0};
   ssize_t len=-1;
 
   if(!(EV_ERROR&revents))
   {
-    len=recv(w->fd,buf,BUF_SIZE,0);
+    len=recv(w->fd,buf,sizeof(buf),0);
     if(len>0)
     {
       buf[len]='\0';
@@ -1091,7 +1106,7 @@ static void input_dir_cb(struct ev_loop *loop, struct ev_stat *w, int revents)
   DIR *d;
   struct dirent *e;
   char nam[sizeof(INPUTDIR)+SNLEN];
-  char buf[BUF_SIZE];
+  char buf[TM_BUFSIZE];
   int len;
   FILE *f;
 
@@ -1108,7 +1123,7 @@ static void input_dir_cb(struct ev_loop *loop, struct ev_stat *w, int revents)
           strcat(nam,e->d_name);
           if(NULL!=(f=fopen(nam,"rb")))
           {
-            len=fread(buf,1,BUF_SIZE,f);
+            len=fread(buf,1,sizeof(buf),f);
             fclose(f);
             if(len>0)
             {
@@ -1126,10 +1141,10 @@ static void input_dir_cb(struct ev_loop *loop, struct ev_stat *w, int revents)
 
 static void read_tcp_input_cb(struct ev_loop *loop, struct ev_io *w, int revents)
 {
-  char buf[BUF_SIZE];
+  char buf[TM_BUFSIZE];
   ssize_t len=-1;
 
-  len=recv(w->fd,buf,BUF_SIZE,0);
+  len=recv(w->fd,buf,sizeof(buf),0);
   if(role==ROLE_LEADER)
   {
     if(!(EV_ERROR&revents))
@@ -1332,7 +1347,7 @@ static void daemonize(void)     // from http://www.enderunix.org/documents/eng/d
   if(-1==dup(i)) exit(1);
   if(-1==dup(i)) exit(1);
   umask(027);                                           // set newly created file permissions
-  lfp=open(LOCK_FILE,O_RDWR|O_CREAT,0640);
+  lfp=open(TM_LOCKFILE,O_RDWR|O_CREAT,0640);
   if(lfp<0) exit(1);                                    // can not open
   if(lockf(lfp,F_TLOCK,0)<0) exit(0);                   // can not lock
   // first instance continues
@@ -1351,7 +1366,7 @@ static void daemonize(void)     // from http://www.enderunix.org/documents/eng/d
  *  input_dir_cb --> move dir scan to file io thread (forward_* needs a variation with local send)
  *
  * DONE:
- *  put DATADIR to /run
+ *  put TM_DATADIR to /run
  *  switch to voter mode if vote related traffic detected in reader mode
  *  nodeid: change to hash+hostname only (hash= add all mac addresses as 64bit int and get 101 hash)
  *  power value: 24bit value 6chars: daemon uptime/8h, speed related byte, nodeid first byte
@@ -1389,7 +1404,7 @@ int main(int argc, char **argv)
   
   if(dmn!=0) daemonize();
 
-  recursive_delete(DATADIR INPUTDIR);
+  recursive_delete(TM_DATADIR INPUTDIR);
   primary_ip(ip_self,sizeof(ip_self));
   bzero(nodeid,sizeof(nodeid));
   bogo=bogomips()/13;
@@ -1401,11 +1416,11 @@ int main(int argc, char **argv)
   srandom(getmachash()+hash(ip_self,7)+time(NULL));
 
   m=umask(0);
-  if(access(DATADIR,R_OK|W_OK|X_OK)==-1)
+  if(access(TM_DATADIR,R_OK|W_OK|X_OK)==-1)
   {
-    if(0!=mkdir(DATADIR,0755))
+    if(0!=mkdir(TM_DATADIR,0755))
     {
-      fprintf(stderr,"datadir '%s' missing and unable to create\n",DATADIR);
+      fprintf(stderr,"datadir '%s' missing and unable to create\n",TM_DATADIR);
       exit(1);
     }
   }
@@ -1496,7 +1511,7 @@ int main(int argc, char **argv)
     if(role!=ROLE_READER)
     {
       fprintf(stderr,"ROLE_LEADER\n");
-      set_leader(DATADIR GLDATA);
+      set_leader(TM_DATADIR GLDATA);
       role=ROLE_LEADER;
       init_tcp(&tcp_input_sd,loop,&tcp_input_watcher,INPUTPORT,read_tcp_input_cb);  // listen on tcp input port, remote sensor data from peers
       ev_run(loop,0);
