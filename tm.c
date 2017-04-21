@@ -471,7 +471,8 @@ static void *file_thread(void *p)
 static int sender_add(char type, char *addr, int port, char *msg)
 {
   int ret=-1;
-  char *b;                  // u;192.168.1.12;112;7;Message
+  char buf[MAXDATA*10];
+  char *b=buf;              // u;192.168.1.12;112;7;Message
   char n[]="\n";
   int blen,len,mlen;
   
@@ -479,14 +480,14 @@ static int sender_add(char type, char *addr, int port, char *msg)
   {
     mlen=strlen(msg);
     blen=strlen(addr)+5+mlen+5+5+2;
-    if(NULL!=(b=malloc(blen)))
+    if(blen<sizeof(buf)||NULL!=(b=malloc(blen)))
     {
       if(msg[mlen-1]=='\n') n[0]='\0';
       else n[0]='\n';
       snprintf(b,blen,"%c;%s;%d;%ld;%s%s",type,addr,port,(long int)mlen+(n[0]=='\0'?0:1),msg,n);
       len=strlen(b)+1;
       if(write(pipew,b,len)==len) ret=0;
-      free(b);
+      if(b!=buf) free(b);
     }
   }
   
@@ -522,18 +523,19 @@ static int file_create_add(int age, const char *dir, const char *name, const cha
 static int file_delete_add(const char *name)
 {
   int ret=-1;
-  char *b;                  // d;0;/tmp/tm_data/TC00ff33hurk;0;
+  char buf[250];
+  char *b=buf;              // d;0;/tmp/tm_data/TC00ff33hurk;0;
   int blen,len;
   
   if(pipef>0&&name!=NULL)
   {
     blen=strlen(name)+4+3+1;
-    if(NULL!=(b=malloc(blen)))  // FIXME: use static buffers
+    if(blen<sizeof(buf)||NULL!=(b=malloc(blen)))
     {
       snprintf(b,blen,"d;0;%s;0;",name);
       len=strlen(b)+1;
       if(write(pipef,b,len)==len) ret=0;
-      free(b);
+      if(b!=buf) free(b);
     }
   }
   
@@ -1386,12 +1388,12 @@ static void daemonize(void)     // from http://www.enderunix.org/documents/eng/d
 
 /* TODO:
  *  cfg file (datadir,logging)
- *  remove old files --> move to file io thread
  *  input_dir_cb --> move dir scan to file io thread (forward_* needs a variation with local send)
  *
  * DONE:
  *  put TM_DATADIR to /run
  *  switch to voter mode if vote related traffic detected in reader mode
+ *  remove old files --> move to file io thread
  *  nodeid: change to hash+hostname only (hash= add all mac addresses as 64bit int and get 101 hash)
  *  power value: 24bit value 6chars: daemon uptime/8h, speed related byte, nodeid first byte
  *               this should goes to GL00 sensor data and used during voting
