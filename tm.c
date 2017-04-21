@@ -23,6 +23,7 @@
 #include <net/if.h> 
 #include <sys/ioctl.h>
 #ifdef __linux__
+#include <linux/limits.h>
 #include <linux/if_link.h>
 #include <sys/prctl.h>
 #endif
@@ -69,6 +70,9 @@
 #define INPUTDIR TM_DATADIR "in/"
 #define TMPDIR TM_DATADIR "tmp/"
 #define TMPMASK TMPDIR "tmtmp.XXXXXX"
+#define PRI_EV       -8
+#define PRI_SENDER   -9
+#define PRI_FILE    -10
 #define BUSPORT 7697                  // broadcast bus port
 #define INPUTPORT 7698                // leader sensor input tcp port and vote input udp port
 #define LOCALPORT 7699                // local sensor input fwd-ed to LEADER_IP:INPUTPORT
@@ -122,6 +126,8 @@ static char prevleaderip[IPLEN+1];
 static int prevleaderpwr;
 static int quit=0;
 static int numhb=0;
+static gid_t gid;
+static uid_t uid;
 
 static int udp_input_sd=-1;
 static int udp_bus_sd=-1;
@@ -143,6 +149,29 @@ static unsigned int hash(const char* s, unsigned int seed)
   while(*s) hash=hash*101+*s++;
 
   return(hash);
+}
+
+
+static int drop_privileges(gid_t gid, uid_t uid)
+{
+  int ret=0;
+  
+  if(getuid()==0)
+  {
+    prctl(PR_SET_KEEPCAPS,1,0,0,0);
+    if(setgid(gid)!=0)
+    {
+      fprintf(stderr,"cannot set gid\n");
+      ret=-1;
+    }
+    if(setuid(uid)!=0)
+    {
+      fprintf(stderr,"cannot set uid\n");
+      ret=-1;
+    }
+  }
+  
+  return(ret);
 }
 
 
@@ -263,8 +292,9 @@ static void *sender_thread(void *p)
   char *ip,*msg,*n;
   int port,len,mode=0,l,st;
 
-  setpriority(PRIO_PROCESS,0,-8);
-  prctl(PR_SET_KEEPCAPS,1,0,0,0);
+  setpriority(PRIO_PROCESS,0,PRI_SENDER);
+  drop_privileges(gid,uid);
+
   while(1)
   {
     st=1;
@@ -310,54 +340,45 @@ static void *sender_thread(void *p)
 static int write_file(int age, const char *name, const char *str)
 {
   int ret=-1;
-  char *nam;
   int fd,ln;
   char tmpnam[]=TMPMASK;
   struct utimbuf tms;
   
-  setpriority(PRIO_PROCESS,0,-9);
-  prctl(PR_SET_KEEPCAPS,1,0,0,0);
   if(name!=NULL)
   {
-    if(NULL!=(nam=malloc(sizeof(TM_DATADIR)+strlen(name)+1)))
+    if(str!=NULL)
     {
-      strcpy(nam,TM_DATADIR);
-      strcat(nam,name);
-      if(str!=NULL)
+      ln=strlen(str);
+      if((fd=mkstemp(tmpnam))>=0)
       {
-        ln=strlen(str);
-        if((fd=mkstemp(tmpnam))>=0)
+        if(ln==write(fd,str,ln))
         {
-          if(ln==write(fd,str,ln))
+          close(fd);
+          tms.actime=tms.modtime=time(NULL)-age;
+          if(0==utime(tmpnam,&tms))
           {
-            close(fd);
-            tms.actime=tms.modtime=time(NULL)-age;
-            if(0==utime(tmpnam,&tms))
+            if(0==chmod(tmpnam,0644))
             {
-              if(0==chmod(tmpnam,0644))
-              {
-                if(0==rename(tmpnam,nam)) ret=0;
-                else fprintf(stderr,"%s: rename %s to %s failed\n",__func__,tmpnam,nam);
-              }
-              else fprintf(stderr,"%s: chmod failed\n",__func__);
+              if(0==rename(tmpnam,name)) ret=0;
+              else fprintf(stderr,"%s: rename %s to %s failed\n",__func__,tmpnam,name);
             }
-            else fprintf(stderr,"%s: utime failed\n",__func__);
+            else fprintf(stderr,"%s: chmod failed\n",__func__);
           }
-          else fprintf(stderr,"%s: write failed\n",__func__);
-          if(ret!=0) unlink(tmpnam);
+          else fprintf(stderr,"%s: utime failed\n",__func__);
         }
-        else fprintf(stderr,"%s: mkstemp failed\n",__func__);
+        else fprintf(stderr,"%s: write failed\n",__func__);
+        if(ret!=0) unlink(tmpnam);
       }
-      else unlink(nam);
-      free(nam);
+      else fprintf(stderr,"%s: mkstemp failed\n",__func__);
     }
+    else unlink(name);
   }
   
   return(ret);
 }
 
 
-static int file_crate(const char *name, time_t timestamp, const char *data)
+static int file_create(const char *name, time_t timestamp, const char *data)
 {
   int ret=-1;
   
@@ -400,6 +421,9 @@ static void *file_thread(void *p)
   int len,mode=0,l,st;
   time_t ts;
 
+  setpriority(PRIO_PROCESS,0,PRI_FILE);
+  drop_privileges(gid,uid);
+
   while(1)
   {
     st=1;
@@ -423,7 +447,7 @@ static void *file_thread(void *p)
             // TODO: implement the buffer allocation for longer messages
             if(dt-buf+len<=l)
             {
-              if(buf[0]=='c') st=file_crate(nm,ts,dt);
+              if(buf[0]=='c') st=file_create(nm,ts,dt);
               else if(buf[0]=='d') st=file_delete(nm);
               else fprintf(stderr,"unknown command char \"%c\": ",buf[0]);
             }
@@ -471,22 +495,23 @@ static int sender_add(char type, char *addr, int port, char *msg)
 
 
 // request creating/deleting file, schedule the request using the pipe which read by the file thread
-static int file_create_add(int age, const char *name, const char *data)
+static int file_create_add(int age, const char *dir, const char *name, const char *data)
 {
   int ret=-1;
-  char *b;                 	// c;1491024061;/tmp/tm_data/TC00ff33hurk;len;content...
+  char buf[250];
+  char *b=buf;               	// c;1491024061;/tmp/tm_data/TC00ff33hurk;len;content...
   int blen,len,dlen;
   
   if(pipef>0&&name!=NULL&&NULL!=data)
   {
     dlen=strlen(data);
-    blen=strlen(name)+4+dlen+20+20+2;
-    if(NULL!=(b=malloc(blen)))  // FIXME: use static buffers
+    blen=strlen(dir)+1+strlen(name)+4+dlen+20+20+2;
+    if(blen<sizeof(buf)||NULL!=(b=malloc(blen)))
     {
-      snprintf(b,blen,"c;%ld;%s;%ld;%s",time(NULL)-age,name,(long int)dlen,data);
+      snprintf(b,blen,"c;%ld;%s%s;%ld;%s",time(NULL)-age,dir,name,(long int)dlen,data);
       len=strlen(b)+1;
       if(write(pipef,b,len)==len) ret=0;
-      free(b);
+      if(b!=buf) free(b);
     }
   }
   
@@ -518,7 +543,6 @@ static int file_delete_add(const char *name)
 
 static void timeout_cb(EV_P_ ev_timer *w, int revents)
 {
-  fprintf(stderr,"timeout\n");
   ev_break(EV_A_ EVBREAK_ONE);
 }
 
@@ -569,7 +593,7 @@ static void set_leader(char *nam)
   {
     // 6634ff,ff6abana,10.0.1.7
     snprintf(str,sizeof(str),"%s,%s,%s",pwr_self,nodeid,ip_self);
-    file_create_add(0,nam,str);
+    file_create_add(0,TM_DATADIR,nam,str);
   }
   leaderpwr=getrank(pwr_self);
   strcpy(leaderip,ip_self);
@@ -658,7 +682,7 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
       
       if(++numhb>=HBCNT_MAX) numhb=HBCNT_MAX;
       updatepwr(pwr_self);
-      set_leader(TM_DATADIR GLDATA);
+      set_leader(GLDATA);
       pdu[0]='+';
       pdu[1]=PV;
       pdu[2]='\0';
@@ -867,7 +891,7 @@ static int process_item(char *s, int dry)
     strncpy(n,&s[4],12);
     n[12]='\0';
     d=&s[16];
-    if(!dry) file_create_add(age,n,d);
+    if(!dry) file_create_add(age,TM_DATADIR,n,d);
     ret=0;
     if(strcmp(n,GLDATA)==0)
     {
@@ -1387,8 +1411,6 @@ int main(int argc, char **argv)
   ev_stat finput;
   int o,dmn=0,machash;
   mode_t m;
-  gid_t gid;
-  uid_t uid;
 
   uid=TM_DEFAULT_UID;
   gid=TM_DEFAULT_GID;
@@ -1411,7 +1433,7 @@ int main(int argc, char **argv)
         exit(0);
     }
   }
-  
+
   if(getuid()!=0)
   {
     fprintf(stderr,"run as root\n");
@@ -1420,7 +1442,7 @@ int main(int argc, char **argv)
 
   if(dmn!=0) daemonize();
 
-  recursive_delete(TM_DATADIR INPUTDIR);
+  recursive_delete(TM_DATADIR);
   primary_ip(ip_self,sizeof(ip_self));
   bzero(nodeid,sizeof(nodeid));
   bogo=bogomips()/13;
@@ -1440,6 +1462,11 @@ int main(int argc, char **argv)
       exit(1);
     }
   }
+  if(0!=chown(TM_DATADIR,uid,gid))
+  {
+    fprintf(stderr,"chown %d:%d %s failed\n",uid,gid,TM_DATADIR);
+    exit(1);
+  }
   if(access(INPUTDIR,R_OK|W_OK|X_OK)==-1)
   {
     if(0!=mkdir(INPUTDIR,0733))
@@ -1448,6 +1475,11 @@ int main(int argc, char **argv)
       exit(1);
     }
   }
+  if(0!=chown(INPUTDIR,uid,gid))
+  {
+    fprintf(stderr,"chown %d:%d %s failed\n",uid,gid,INPUTDIR);
+    exit(1);
+  }
   if(access(TMPDIR,R_OK|W_OK|X_OK)==-1)
   {
     if(0!=mkdir(TMPDIR,0700))
@@ -1455,6 +1487,11 @@ int main(int argc, char **argv)
       fprintf(stderr,"tmpdir '%s' missing and unable to create\n",TMPDIR);
       exit(1);
     }
+  }
+  if(0!=chown(TMPDIR,uid,gid))
+  {
+    fprintf(stderr,"chown %d:%d %s failed\n",uid,gid,TMPDIR);
+    exit(1);
   }
 
   if(0!=pipe(pfdss))
@@ -1485,22 +1522,8 @@ int main(int argc, char **argv)
     exit(1);
   }
 
-  setpriority(PRIO_PROCESS,0,-10);
-
-  if(getuid()==0)
-  {
-    prctl(PR_SET_KEEPCAPS,1,0,0,0);
-    if(setgid(gid)!=0)
-    {
-      fprintf(stderr,"cannot set gid\n");
-      exit(1);
-    }
-    if(setuid(uid)!=0)
-    {
-      fprintf(stderr,"cannot set uid\n");
-      exit(0);
-    }
-  }
+  setpriority(PRIO_PROCESS,0,PRI_EV);
+  drop_privileges(gid,uid);
 
   init_tcp(&tcp_local_sd,loop,&tcp_local_watcher,LOCALPORT,read_tcp_local_cb);  // listen on local tcp input port for local sensor data
   init_udp(&udp_bus_sd,loop,&udp_bus_watcher,BUSPORT,udp_bus_cb);               // listen to broadcast udp bus
@@ -1544,7 +1567,7 @@ int main(int argc, char **argv)
     if(role!=ROLE_READER)
     {
       fprintf(stderr,"ROLE_LEADER\n");
-      set_leader(TM_DATADIR GLDATA);
+      set_leader(GLDATA);
       role=ROLE_LEADER;
       init_tcp(&tcp_input_sd,loop,&tcp_input_watcher,INPUTPORT,read_tcp_input_cb);  // listen on tcp input port, remote sensor data from peers
       ev_run(loop,0);
