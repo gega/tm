@@ -80,6 +80,7 @@
 #define PV 'b'                        // protocol version
 #define HEARTBEAT 1000                // 4 leader sequences in every HEARTBEAT ms
 #define VOTEHB 150                    // voting heartbeat in ms
+#define READERHB  5000                // reader heartbeat in ms
 #define BUSTMO ((HEARTBEAT*5)/1000)   // minimum timeout in secs for bus inactivity and start voting session
 #define VOTETMO ((VOTEHB*20)/1000)    // voting timeout in secs
 #define GL_1 'G'
@@ -744,6 +745,11 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
       }
       if(pdu[0]!='\0') sender_add(T_UDP,ADDR_BROADCAST,BUSPORT,pdu);
     }
+    else if(role==ROLE_READER)
+    {
+      snprintf(pdu,sizeof(pdu),"#%cHB00%s",PV,ip_self);
+      sender_add(T_TCP,"127.0.0.1",LOCALPORT,pdu);
+    }
   }
 }
 
@@ -1389,6 +1395,8 @@ static void daemonize(void)     // from http://www.enderunix.org/documents/eng/d
 /* TODO:
  *  cfg file (datadir,logging)
  *  input_dir_cb --> move dir scan to file io thread (forward_* needs a variation with local send)
+ *  logging
+ *  heartbeat for readers
  *
  * DONE:
  *  put TM_DATADIR to /run
@@ -1544,6 +1552,8 @@ int main(int argc, char **argv)
   {
 
     fprintf(stderr,"ROLE_READER\n");
+    heartbeat_watcher.repeat=READERHB/1000.0;
+    ev_timer_again(loop,&heartbeat_watcher);
     role=ROLE_READER;
     timeout_watcher.repeat=BUSTMO;
     ev_timer_again(loop,&timeout_watcher);
@@ -1575,7 +1585,6 @@ int main(int argc, char **argv)
       ev_run(loop,0);
       close_tcp(&tcp_input_sd,loop,&tcp_input_watcher);
     }
-    ev_timer_stop(loop,&heartbeat_watcher);
   }
 
   if(write(pipew,"quit",5)<=0) fprintf(stderr,"write error\n");
