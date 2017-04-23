@@ -34,6 +34,7 @@
 #include <net/if_dl.h>
 #endif
 #include <fts.h>
+#include <syslog.h>
 
 
 
@@ -56,6 +57,9 @@
 #endif
 #ifndef TM_DEFAULT_GID
 #define TM_DEFAULT_GID TM_DEFAULT_UID
+#endif
+#ifndef TM_LOG_IDENT
+#define TM_LOG_IDENT "tmd"
 #endif
 
 // CONFIG AREA END
@@ -162,12 +166,12 @@ static int drop_privileges(gid_t gid, uid_t uid)
     prctl(PR_SET_KEEPCAPS,1,0,0,0);
     if(setgid(gid)!=0)
     {
-      fprintf(stderr,"cannot set gid\n");
+      syslog(LOG_ERR,"cannot set gid\n");
       ret=-1;
     }
     if(setuid(uid)!=0)
     {
-      fprintf(stderr,"cannot set uid\n");
+      syslog(LOG_ERR,"cannot set uid\n");
       ret=-1;
     }
   }
@@ -224,16 +228,16 @@ static int send_udp(char *addr, int port, char *msg, int len)
         if(rc!=0)
         {
           if(sendto(s,(const void *)msg,(size_t)len,0,(const struct sockaddr *)&si,sizeof(si))!=-1) ret=0;
-          else fprintf(stderr,"%s: sendto failed %s:%d '%s'\n",__func__,addr,port,msg);
+          else syslog(LOG_WARNING,"%s: sendto failed %s:%d '%s'\n",__func__,addr,port,msg);
         }
-        else fprintf(stderr,"%s: aton failure %s:%d\n",__func__,addr,port);
+        else syslog(LOG_WARNING,"%s: aton failure %s:%d\n",__func__,addr,port);
       }
-      else fprintf(stderr,"%s: cannot enable broadcast\n",__func__);
+      else syslog(LOG_ERR,"%s: cannot enable broadcast\n",__func__);
       close(s);
     }
-    else fprintf(stderr,"%s: cannot create socket\n",__func__);
+    else syslog(LOG_CRIT,"%s: cannot create socket\n",__func__);
   }
-  else fprintf(stderr,"%s: invalid input\n",__func__);
+  else syslog(LOG_ERR,"%s: invalid input\n",__func__);
   
   return(ret);
 }
@@ -259,13 +263,13 @@ static int send_tcp(char *addr, int port, char *msg, int len)
           if(send(s,msg,len,0)==len) ret=0;
           close(s);
         }
-        else fprintf(stderr,"%s: cannot connect to %s\n",__func__,addr);
+        else syslog(LOG_WARNING,"%s: cannot connect to %s\n",__func__,addr);
       }
-      else fprintf(stderr,"%s: aton failure %s:%d\n",__func__,addr,port);
+      else syslog(LOG_WARNING,"%s: aton failure %s:%d\n",__func__,addr,port);
     }
-    else fprintf(stderr,"%s: cannot create socket\n",__func__);
+    else syslog(LOG_CRIT,"%s: cannot create socket\n",__func__);
   }
-  else fprintf(stderr,"%s: invalid input\n",__func__);
+  else syslog(LOG_ERR,"%s: invalid input\n",__func__);
   
   return(ret);
 }
@@ -320,16 +324,16 @@ static void *sender_thread(void *p)
             {
               if(buf[0]=='u') st=send_udp(ip,port,msg,len);
               else if(buf[0]=='t') st=send_tcp(ip,port,msg,len);
-              else fprintf(stderr,"unknown command char \"%c\": ",buf[0]);
+              else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
             }
-            else fprintf(stderr,"WARNING: too long message: %ld read only the first %d bytes: ",(long int)(msg-buf+len),l);
+            else syslog(LOG_WARNING,"too long message: %ld read only the first %d bytes: ",(long int)(msg-buf+len),l);
           }
-          else fprintf(stderr,"missing message separator: ");
+          else syslog(LOG_ERR,"missing message separator: ");
         }
-        else fprintf(stderr,"missing length separator: ");
+        else syslog(LOG_ERR,"missing length separator: ");
       }
-      else fprintf(stderr,"missing ip separator: ");
-      if(st!=0) fprintf(stderr,"st=%d '%s'\n",st,buf);
+      else syslog(LOG_ERR,"missing ip separator: ");
+      if(st!=0) syslog(LOG_WARNING,"st=%d '%s'\n",st,buf);
     }
   }
   pthread_exit(NULL);
@@ -361,16 +365,16 @@ static int write_file(int age, const char *name, const char *str)
             if(0==chmod(tmpnam,0644))
             {
               if(0==rename(tmpnam,name)) ret=0;
-              else fprintf(stderr,"%s: rename %s to %s failed\n",__func__,tmpnam,name);
+              else syslog(LOG_WARNING,"%s: rename %s to %s failed\n",__func__,tmpnam,name);
             }
-            else fprintf(stderr,"%s: chmod failed\n",__func__);
+            else syslog(LOG_WARNING,"%s: chmod failed\n",__func__);
           }
-          else fprintf(stderr,"%s: utime failed\n",__func__);
+          else syslog(LOG_WARNING,"%s: utime failed\n",__func__);
         }
-        else fprintf(stderr,"%s: write failed\n",__func__);
+        else syslog(LOG_WARNING,"%s: write failed\n",__func__);
         if(ret!=0) unlink(tmpnam);
       }
-      else fprintf(stderr,"%s: mkstemp failed\n",__func__);
+      else syslog(LOG_ERR,"%s: mkstemp failed\n",__func__);
     }
     else unlink(name);
   }
@@ -450,16 +454,16 @@ static void *file_thread(void *p)
             {
               if(buf[0]=='c') st=file_create(nm,ts,dt);
               else if(buf[0]=='d') st=file_delete(nm);
-              else fprintf(stderr,"unknown command char \"%c\": ",buf[0]);
+              else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
             }
-            else fprintf(stderr,"WARNING: too long data: %ld read only the first %d bytes: ",(long int)(dt-buf+len),l);
+            else syslog(LOG_WARNING,"too long data: %ld read only the first %d bytes: ",(long int)(dt-buf+len),l);
           }
-          else fprintf(stderr,"missing data separator");
+          else syslog(LOG_ERR,"missing data separator");
         }
-        else fprintf(stderr,"missing length separator");
+        else syslog(LOG_ERR,"missing length separator");
       }
-      else fprintf(stderr,"missing timestamp separator: ");
-      if(st!=0) fprintf(stderr,"st=%d '%s'\n",st,buf);
+      else syslog(LOG_ERR,"missing timestamp separator: ");
+      if(st!=0) syslog(LOG_WARNING,"st=%d '%s'\n",st,buf);
     }
   }
   pthread_exit(NULL);
@@ -626,11 +630,11 @@ static int init_udp(int *sd, struct ev_loop *l, ev_io *w, int port, void (*cb)(E
         ev_io_start(l,w);
         ret=0;
       }
-      else fprintf(stderr,"%s: bind failed\n",__func__);
+      else syslog(LOG_ERR,"%s: bind failed\n",__func__);
     }
-    else fprintf(stderr,"%s: setsockopt REUSEADDR failed\n",__func__);
+    else syslog(LOG_WARNING,"%s: setsockopt REUSEADDR failed\n",__func__);
   }
-  else fprintf(stderr,"%s: invalid input\n",__func__);
+  else syslog(LOG_ERR,"%s: invalid input\n",__func__);
 
   return(ret);
 }
@@ -702,7 +706,7 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
             strcat(nam,e->d_name);
             if(len<IDLEN+4+1)
             {
-              fprintf(stderr,"%s: buffer too small, skipping '%s'\n",__func__,e->d_name);
+              syslog(LOG_WARNING,"%s: buffer too small, skipping '%s'\n",__func__,e->d_name);
               continue;
             }
             a=getfileage(nam,now);
@@ -732,13 +736,13 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
               }
               else
               {
-                fprintf(stderr,"%s: read error '%s' skipped\n",__func__,e->d_name);
+                syslog(LOG_WARNING,"%s: read error '%s' skipped\n",__func__,e->d_name);
                 p-=IDLEN+4+4+1;
                 len+=IDLEN+4+4+1;
               }
               fclose(fp);
             }
-            else fprintf(stderr,"%s: file open error '%s'",__func__,e->d_name);
+            else syslog(LOG_WARNING,"%s: file open error '%s'",__func__,e->d_name);
           }
         }
         closedir(d);
@@ -777,16 +781,16 @@ static void accept_tcp_cb(struct ev_loop *loop, struct ev_io *w, int revents)
             ev_io_start(loop,wc);
             st=0;
           }
-          else fprintf(stderr,"%s: accept failed\n",__func__);
+          else syslog(LOG_WARNING,"%s: accept failed\n",__func__);
         }
-        else fprintf(stderr,"%s: invalid event\n",__func__);
+        else syslog(LOG_WARNING,"%s: invalid event\n",__func__);
       }
-      else fprintf(stderr,"%s: missing tcp_data field",__func__);
+      else syslog(LOG_WARNING,"%s: missing tcp_data field",__func__);
     }
-    else fprintf(stderr,"%s: invalid watcher\n",__func__);
+    else syslog(LOG_WARNING,"%s: invalid watcher\n",__func__);
     if(st!=0) free(wc);
   }
-  else fprintf(stderr,"%s: no memory\n",__func__);
+  else syslog(LOG_CRIT,"%s: no memory\n",__func__);
 }
 
 
@@ -818,15 +822,15 @@ static int init_tcp(int *sd, struct ev_loop *l, ev_io *w, int port, void (*cb)(E
               ev_io_init(w,accept_tcp_cb,*sd,EV_READ);
               ev_io_start(l,w);
             }
-            else fprintf(stderr,"%s: listen failed\n",__func__);
+            else syslog(LOG_WARNING,"%s: listen failed\n",__func__);
           }
-          else fprintf(stderr,"%s: cannot bind socket\n",__func__);
+          else syslog(LOG_WARNING,"%s: cannot bind socket\n",__func__);
         }
-        else fprintf(stderr,"%s: cannot set SO_REUSEADDR on socket\n",__func__);
+        else syslog(LOG_WARNING,"%s: cannot set SO_REUSEADDR on socket\n",__func__);
       }
-      else fprintf(stderr,"%s: cannot create socket\n",__func__);
+      else syslog(LOG_CRIT,"%s: cannot create socket\n",__func__);
     }
-    else fprintf(stderr,"%s: no memory\n",__func__);
+    else syslog(LOG_CRIT,"%s: no memory\n",__func__);
   }
   
   return(ret);
@@ -962,8 +966,12 @@ static void udp_input_cb(struct ev_loop *loop, ev_io *w, int revents)
       buf[len]='\0';
       if(buf[0]=='!'&&buf[1]==PV)
       {
-        if(getrank(pwr_self)<getrank(&buf[2]))
+        int ps,pr;
+        ps=getrank(pwr_self);
+        pr=getrank(&buf[2]);
+        if(ps<pr)
         {
+          syslog(LOG_NOTICE,"rank self %d < rank %.8s=%d, voting lost\n",ps,&buf[2+PWRLEN+1],pr);
           role=ROLE_READER;
           ev_break(EV_A_ EVBREAK_ONE);
         }
@@ -1036,7 +1044,6 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
             votedforpwr=getrank(&buf[2]);
           }
         }
-        if(role==ROLE_READER) ev_break(EV_A_ EVBREAK_ONE); // switch to voting mode
       }
       delete_old(TM_MAXAGE);
     }
@@ -1050,12 +1057,17 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
           char wtfip[IPLEN+1];
           if(prevleaderpwr<leaderpwr)
           {
+            syslog(LOG_NOTICE,"rank %d > other leader %s=%d, sending WTF\n",leaderpwr,leaderid,prevleaderpwr);
             strcpy(wtfip,leaderip);
             strcpy(leaderip,ip_self);
             strcpy(leaderid,nodeid);
             sender_add(T_TCP,wtfip,INPUTPORT,WTFMSG);
           }
-          else ev_break(EV_A_ EVBREAK_ONE); // switch roles
+          else
+          {
+            syslog(LOG_NOTICE,"rank %d < new leader %s=%d, switch to reader\n",leaderpwr,leaderid,prevleaderpwr);
+            ev_break(EV_A_ EVBREAK_ONE); // switch roles
+          }
         }
       }
       // ignore everything else as leader
@@ -1112,6 +1124,7 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
       if(strncmp("quit",buf,4)==0)
       {
         quit=1;
+        syslog(LOG_NOTICE,"local quit request");
         ev_break(EV_A_ EVBREAK_ONE);
       }
       else if(buf[0]=='#'&&buf[1]==PV)
@@ -1120,9 +1133,9 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
         forward_sensor_input(sn,&buf[6]);
       }
     }
-    else if(len<0) fprintf(stderr,"read error\n");
+    else if(len<0) syslog(LOG_WARNING,"read error\n");
   }
-  else fprintf(stderr,"invalid client\n");
+  else syslog(LOG_WARNING,"invalid client\n");
   
   if(len==0)
   {
@@ -1187,13 +1200,13 @@ static void read_tcp_input_cb(struct ev_loop *loop, struct ev_io *w, int revents
         if(buf[0]=='+'&&buf[1]==PV) process_line(&buf[2],0);
         else if(strncmp(buf,WTFMSG,sizeof(WTFMSG)-1)==0)
         {
-          fprintf(stderr,"WTF --> reader\n");
+          syslog(LOG_NOTICE,"WTF received, switch to reader\n");
           ev_break(EV_A_ EVBREAK_ONE);
         }
       }
-      else if(len<0) fprintf(stderr,"%s: read error\n",__func__);
+      else if(len<0) syslog(LOG_WARNING,"%s: read error\n",__func__);
     }
-    else fprintf(stderr,"%s: invalid client\n",__func__);
+    else syslog(LOG_WARNING,"%s: invalid client\n",__func__);
   }
   else len=0;
   
@@ -1395,10 +1408,10 @@ static void daemonize(void)     // from http://www.enderunix.org/documents/eng/d
 /* TODO:
  *  cfg file (datadir,logging)
  *  input_dir_cb --> move dir scan to file io thread (forward_* needs a variation with local send)
- *  logging
- *  heartbeat for readers
  *
  * DONE:
+ *  logging
+ *  heartbeat for readers
  *  put TM_DATADIR to /run
  *  switch to voter mode if vote related traffic detected in reader mode
  *  remove old files --> move to file io thread
@@ -1452,6 +1465,7 @@ int main(int argc, char **argv)
 
   if(dmn!=0) daemonize();
 
+  openlog(TM_LOG_IDENT,LOG_PID|LOG_NOWAIT,LOG_USER);
   recursive_delete(TM_DATADIR);
   primary_ip(ip_self,sizeof(ip_self));
   bzero(nodeid,sizeof(nodeid));
@@ -1551,7 +1565,7 @@ int main(int argc, char **argv)
   while(quit==0)
   {
 
-    fprintf(stderr,"ROLE_READER\n");
+    syslog(LOG_NOTICE,"ROLE_READER\n");
     heartbeat_watcher.repeat=READERHB/1000.0;
     ev_timer_again(loop,&heartbeat_watcher);
     role=ROLE_READER;
@@ -1561,7 +1575,7 @@ int main(int argc, char **argv)
     
     if(quit!=0) break;
 
-    fprintf(stderr,"ROLE_VOTER\n");
+    syslog(LOG_NOTICE,"ROLE_VOTER\n");
     updatepwr(pwr_self);
     role=ROLE_VOTER;
     usleep((random()%VOTEHB)*1000);
@@ -1578,7 +1592,7 @@ int main(int argc, char **argv)
 
     if(role!=ROLE_READER)
     {
-      fprintf(stderr,"ROLE_LEADER\n");
+      syslog(LOG_NOTICE,"ROLE_LEADER\n");
       set_leader(GLDATA);
       role=ROLE_LEADER;
       init_tcp(&tcp_input_sd,loop,&tcp_input_watcher,INPUTPORT,read_tcp_input_cb);  // listen on tcp input port, remote sensor data from peers
@@ -1587,10 +1601,10 @@ int main(int argc, char **argv)
     }
   }
 
-  if(write(pipew,"quit",5)<=0) fprintf(stderr,"write error\n");
+  if(write(pipew,"quit",5)<=0) syslog(LOG_WARNING,"write error\n");
   pthread_join(pt,NULL);
 
-  if(write(pipef,"quit",5)<=0) fprintf(stderr,"write error\n");
+  if(write(pipef,"quit",5)<=0) syslog(LOG_WARNING,"write error\n");
   pthread_join(ptf,NULL);
   
   close_udp(&udp_input_sd,loop,&udp_input_watcher);
@@ -1598,6 +1612,7 @@ int main(int argc, char **argv)
   close_tcp(&tcp_local_sd,loop,&tcp_local_watcher);
   close_udp(&udp_bus_sd,loop,&udp_bus_watcher);
 
+  closelog();
   umask(m);
 
   return(0);
