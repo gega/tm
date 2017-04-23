@@ -27,11 +27,24 @@ Local sensors can feed data to the system in one of two ways:
 
 ### misc
 
-| name             | value
-| ---------------- | ------------------- |
-| data directory   | /var/run/tm_data    |
-| input directory  | /var/run/tm_data/in |
-| local input port | 7699                |
+| name             | value               | config
+| ---------------- | ------------------- | ---------
+| data directory   | /var/run/tm_data    | TM_DATADIR
+| input directory  | /var/run/tm_data/in | -
+| local input port | 7699                | -
+| buffer size      | 4096                | TM_BUFSIZE
+| max data age     | 3600                | TM_MAXAGE
+| lockfile         | /var/lock/tm.lock   | TM_LOCKFILE
+| default uid      | 1000                | TM_DEFAULT_UID
+| default group    | uid                 | TM_DEFAULT_GID
+| max sensor data  | 256                 | -
+| sensor heartbeat | 5000 ms             | -
+| system heartbeat | 1000 ms             | -
+| global prefix    | GL                  | -
+| heartbeat prefix | HB                  | -
+| UDP bus port     | 7697                | -
+| TCP fwd port     | 7698                | -
+
 
 ### Disclaimer
 _This is not a hard real time system and shouldn't be used for critical and urgent data. The typical delivery time is ~0.5-1sec but there are no guarantees of data consistency and delivery times in this implementation nor in the supported underlying operating system._
