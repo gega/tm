@@ -100,6 +100,7 @@
 #define SNLEN (4)
 #define PWRLEN (6)                    // length of "power" string
 #define FNAMLEN (IDLEN+SNLEN)
+#define WAKEUPLIMIT (60)              // if the last hb was older, wait 2 cycles
 
 #define ROLE_READER 0
 #define ROLE_VOTER  1
@@ -133,6 +134,7 @@ static int quit=0;
 static int numhb=0;
 static gid_t gid;
 static uid_t uid;
+static time_t lasthb=0;
 
 static int udp_input_sd=-1;
 static int udp_bus_sd=-1;
@@ -552,7 +554,14 @@ static int file_delete_add(const char *name)
 
 static void timeout_cb(EV_P_ ev_timer *w, int revents)
 {
-  ev_break(EV_A_ EVBREAK_ONE);
+  time_t now=time(NULL);
+  if(difftime(now,lasthb)>WAKEUPLIMIT)
+  {
+    syslog(LOG_NOTICE,"%s: wakeup limit, wait one more cycle",__func__);
+    ev_timer_again(loop,&timeout_watcher);
+    lasthb=now;
+  }
+  else ev_break(EV_A_ EVBREAK_ONE);
 }
 
 
@@ -985,7 +994,6 @@ static void udp_input_cb(struct ev_loop *loop, ev_io *w, int revents)
 
 static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
 {
-  static time_t lasthb=0;
   static time_t lastvoted=0;
   static char votedfor[IDLEN+1]={0};
   static int votedforpwr=0;
