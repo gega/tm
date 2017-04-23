@@ -180,7 +180,7 @@ static int drop_privileges(gid_t gid, uid_t uid)
 }
 
 
-static void primary_ip(char* buffer, size_t buflen)
+static void primary_ip(char *buffer, size_t buflen)
 {
   const char *dnsip="8.8.8.8";
   struct sockaddr_in srv;
@@ -188,7 +188,7 @@ static void primary_ip(char* buffer, size_t buflen)
   struct sockaddr_in name;
   socklen_t namelen=sizeof(name);
   
-  if(buflen>=16&&buffer!=NULL)
+  if(buflen>IPLEN&&buffer!=NULL)
   {
     buffer[0]='\0';
     if((s=socket(AF_INET,SOCK_DGRAM,0))>=0)
@@ -304,6 +304,7 @@ static void *sender_thread(void *p)
   {
     st=1;
     l=read(fd,buf,sizeof(buf));
+    if(l>=0) buf[l]='\0';
     if(mode==0)
     {
       if(buf[0]=='q') break;
@@ -433,6 +434,7 @@ static void *file_thread(void *p)
   {
     st=1;
     l=read(fd,buf,sizeof(buf));
+    if(l>=0) buf[l]='\0';
     if(mode==0)
     {
       if(buf[0]=='q') break;
