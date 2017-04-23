@@ -28,10 +28,10 @@ Local sensors can feed data to the system in one of two ways:
 ### misc
 
 | name             | value
-| ---------------- | --------------- |
-| data directory   | /tmp/tm_data    |
-| input directory  | /tmp/tm_data/in |
-| local input port | 7698            |
+| ---------------- | ------------------- |
+| data directory   | /var/run/tm_data    |
+| input directory  | /var/run/tm_data/in |
+| local input port | 7699                |
 
 ### Disclaimer
 _This is not a hard real time system and shouldn't be used for critical and urgent data. The typical delivery time is ~0.5-1sec but there are no guarantees of data consistency and delivery times in this implementation nor in the supported underlying operating system._
