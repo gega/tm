@@ -14,13 +14,25 @@ The purpose of the system is to share current data in the network like temperatu
 
 ### data filename structure
 - Sensor type (2char)
-- Sensor instance (2char)
+- Sensor instance (2 hex digits, MSBs: priority)
 - Source node id or "xxx..." if the data is global (8char)
 
-### Sensor Data Content
-One line of ascii text.
+### sensor priority
+Encoded in sensor instance number in the two most significant bits.
 
-### Sensor Input
+| MSB | hex | priority | frequency
+| --- | --- | -------- | ---------
+| 00  | $0x | urgent   | 1 sec
+| 01  | $4x | normal   | 5 sec
+| 10  | $8x | low      | 61 sec
+| 11  | $cx | sporadic | once*
+
+* appears in every cycle for 1 minute after generated
+
+### sensor Data Content
+One line of ascii7 text without space. Binary data can be base64 encoded. Maximum length is 256 bytes.
+
+### sensor Input
 Local sensors can feed data to the system in one of two ways:
 - Writing a file to the "input" directory, where the filename should be the sensor type and instance and the content should be the measurements
 - Sending the measurement to the tcp input port to localhost (name, content)
