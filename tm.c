@@ -76,7 +76,7 @@
 #define TMPMASK TMPDIR "tmtmp.XXXXXX"
 #define PRI_EV       -8
 #define PRI_SENDER   -9
-#define PRI_FILE    -10
+#define PRI_FILE    -12
 #define BUSPORT 7697                  // broadcast bus port
 #define INPUTPORT 7698                // leader sensor input tcp port and vote input udp port
 #define LOCALPORT 7699                // local sensor input fwd-ed to LEADER_IP:INPUTPORT
@@ -91,6 +91,7 @@
 #define GL_2 'L'
 #define GLOBALID "xxxxxxxx"
 #define GLDATA "GL00" GLOBALID        // master data name (leader ip and id)
+#define HBDATA "HB80"
 #define T_UDP 'u'
 #define T_TCP 't'
 #define ADDR_BROADCAST "255.255.255.255"
@@ -100,7 +101,15 @@
 #define SNLEN (4)
 #define PWRLEN (6)                    // length of "power" string
 #define FNAMLEN (IDLEN+SNLEN)
-#define WAKEUPLIMIT (60)              // if the last hb was older, wait 2 cycles
+#define WAKEUPLIMIT (60)              // if the last hb was older, wait 2nd cycle
+#define FRQ_NORMAL 5                  // normal frames every FRQ_NORMAL th cycles
+#define FRQ_RARE   61                 // rare frames every FRQ_RARE th cycle
+#define SPORADIC_AGE 60               // sporadic frames until reaches SPORADIC_AGE
+#define P_SPORADIC (0xc0)
+#define P_RARE     (0x80)
+#define P_NORMAL   (0x40)
+#define P_URGENT   (0x00)
+#define PRIMASK    (0xc0)
 
 #define ROLE_READER 0
 #define ROLE_VOTER  1
@@ -156,6 +165,22 @@ static unsigned int hash(const char* s, unsigned int seed)
   while(*s) hash=hash*101+*s++;
 
   return(hash);
+}
+
+
+static int getpri(const char *nam)
+{
+  int ret=-1;
+  char p[]="00";
+  
+  if(nam!=NULL)
+  {
+    p[0]=nam[2];
+    p[1]=nam[3];
+    ret=strtol(p,NULL,16)&PRIMASK;
+  }
+  
+  return(ret);
 }
 
 
@@ -423,23 +448,24 @@ static int file_delete(const char *name)
  */
 static void *file_thread(void *p)
 {
-  char buf[SENDER_BUFSIZ+1];
+  char b[SENDER_BUFSIZ+1];
   int fd=(int)((long)p);
-  char *nm,*dt,*n;
-  int len,mode=0,l,st;
+  char *nm,*dt,*n,*buf;
+  int len,l,st;
   time_t ts;
+  int q=0;
 
   setpriority(PRIO_PROCESS,0,PRI_FILE);
   drop_privileges(gid,uid);
 
-  while(1)
+  while(q==0)
   {
-    st=1;
-    l=read(fd,buf,sizeof(buf));
-    if(l>=0) buf[l]='\0';
-    if(mode==0)
+    l=read(fd,b,sizeof(b));
+    if(l>=0) b[l]='\0';
+    for(st=0,buf=b;st==0&&buf-b<l;)
     {
-      if(buf[0]=='q') break;
+      st=1;
+      if(buf[0]=='q') { q=1; break; }
       // parse timestamp, path and content
       n=&buf[2];
       ts=strtol(n,NULL,10);
@@ -459,6 +485,7 @@ static void *file_thread(void *p)
               if(buf[0]=='c') st=file_create(nm,ts,dt);
               else if(buf[0]=='d') st=file_delete(nm);
               else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
+              buf=dt+len+1;
             }
             else syslog(LOG_WARNING,"too long data: %ld read only the first %d bytes: ",(long int)(dt-buf+len),l);
           }
@@ -467,7 +494,7 @@ static void *file_thread(void *p)
         else syslog(LOG_ERR,"missing length separator");
       }
       else syslog(LOG_ERR,"missing timestamp separator: ");
-      if(st!=0) syslog(LOG_WARNING,"st=%d '%s'\n",st,buf);
+      if(st!=0) syslog(LOG_WARNING,"st=%d",st);
     }
   }
   pthread_exit(NULL);
@@ -665,6 +692,34 @@ static void close_udp(int *sd, struct ev_loop *l, ev_io *w)
 }
 
 
+static int delete_old(void)
+{
+  char nam[sizeof(TM_DATADIR)+FNAMLEN];
+  time_t now;
+  DIR *d;
+  struct dirent *e;
+  int a;
+
+  now=time(NULL);
+  if(NULL!=(d=opendir(TM_DATADIR)))
+  {
+    while((e=readdir(d)))
+    {
+      if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
+      {
+        strcpy(nam,TM_DATADIR);
+        strcat(nam,e->d_name);
+        a=getfileage(nam,now);
+        if(a>TM_MAXAGE||(getpri(e->d_name)==P_SPORADIC&&a>SPORADIC_AGE)) file_delete_add(nam);
+      }
+    }
+    closedir(d);
+  }
+
+  return(0);
+}
+
+
 static void updatepwr(char *p)
 {
   char v[]="00";
@@ -697,8 +752,11 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
       FILE *fp;
       DIR *d;
       struct dirent *e;
+      int ispnormal,isprare,pri;
       
       if(++numhb>=HBCNT_MAX) numhb=HBCNT_MAX;
+      ispnormal=numhb%FRQ_NORMAL;
+      isprare=numhb%FRQ_RARE;
       updatepwr(pwr_self);
       set_leader(GLDATA);
       pdu[0]='+';
@@ -720,12 +778,10 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
               syslog(LOG_WARNING,"%s: buffer too small, skipping '%s'\n",__func__,e->d_name);
               continue;
             }
+            pri=getpri(e->d_name);
+            if(pri==P_NORMAL&&ispnormal!=0) continue;
+            if(pri==P_RARE&&isprare!=0) continue;
             a=getfileage(nam,now);
-            if(a>TM_MAXAGE)
-            {
-              file_delete_add(nam);
-              continue;
-            }
             // space
             *p=' '; len--; *++p='\0';
             // mod time
@@ -758,11 +814,12 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
         }
         closedir(d);
       }
+      delete_old();
       if(pdu[0]!='\0') sender_add(T_UDP,ADDR_BROADCAST,BUSPORT,pdu);
     }
     else if(role==ROLE_READER)
     {
-      snprintf(pdu,sizeof(pdu),"#%cHB00%s",PV,ip_self);
+      snprintf(pdu,sizeof(pdu),"#%c" HBDATA "%s",PV,ip_self);
       sender_add(T_TCP,"127.0.0.1",LOCALPORT,pdu);
     }
   }
@@ -865,32 +922,6 @@ static void close_tcp(int *sd, struct ev_loop *l, ev_io *w)
       w->data=NULL;
     }
   }
-}
-
-
-static int delete_old(int maxage)
-{
-  char nam[sizeof(TM_DATADIR)+FNAMLEN];
-  time_t now;
-  DIR *d;
-  struct dirent *e;
-
-  now=time(NULL);
-  if(NULL!=(d=opendir(TM_DATADIR)))
-  {
-    while((e=readdir(d)))
-    {
-      if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
-      {
-        strcpy(nam,TM_DATADIR);
-        strcat(nam,e->d_name);
-        if(getfileage(nam,now)>maxage) file_delete_add(nam);
-      }
-    }
-    closedir(d);
-  }
-
-  return(0);
 }
 
 
@@ -1055,7 +1086,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
           }
         }
       }
-      delete_old(TM_MAXAGE);
+      delete_old();
     }
     else if(role==ROLE_LEADER)
     {
@@ -1418,7 +1449,11 @@ static void daemonize(void)     // from http://www.enderunix.org/documents/eng/d
 /* TODO:
  *  cfg file (datadir,logging)
  *  input_dir_cb --> move dir scan to file io thread (forward_* needs a variation with local send)
- *
+ *  implement priority for sensors: (id 2 MSB)
+ *            - 00xx xxxx 0x important: every cycle (1sec in b)
+ *            - 01xx xxxx 4x normal: every 5th cycle
+ *            - 10xx xxxx 8x rare: every 61th cycle
+ *            - 11xx xxxx cx sporadic: every cycle until age < 120secs
  * DONE:
  *  logging
  *  heartbeat for readers
