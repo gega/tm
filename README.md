@@ -25,9 +25,9 @@ Encoded in sensor instance number in the two most significant bits.
 | 00  | $0x | urgent   | 1 sec
 | 01  | $4x | normal   | 5 sec
 | 10  | $8x | low      | 61 sec
-| 11  | $cx | sporadic | once*
+| 11  | $cx | sporadic | once<sup>1</sup>
 
-* appears in every cycle for 1 minute after generated
+<sup>1</sup> appears in every cycle for 1 minute after generated
 
 ### sensor Data Content
 One line of ascii7 text without space. Binary data can be base64 encoded. Maximum length is 256 bytes.
