@@ -29,10 +29,10 @@ Encoded in sensor instance number in the two most significant bits.
 
 <sup>1</sup> appears in every cycle for 1 minute after generated
 
-### sensor Data Content
+### sensor data content
 One line of ascii7 text without space. Binary data can be base64 encoded. Maximum length is 256 bytes.
 
-### sensor Input
+### sensor input
 Local sensors can feed data to the system in one of two ways:
 - Writing a file to the "input" directory, where the filename should be the sensor type and instance and the content should be the measurements
 - Sending the measurement to the tcp input port to localhost (name, content)
