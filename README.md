@@ -20,12 +20,12 @@ The purpose of the system is to share current data in the network like temperatu
 ### sensor priority
 Encoded in sensor instance number in the two most significant bits.
 
-| MSB | hex | priority | frequency
-| --- | --- | -------- | ---------
-| 00  | $0x | urgent   | 1 sec
-| 01  | $4x | normal   | 5 sec
-| 10  | $8x | low      | 61 sec
-| 11  | $cx | sporadic | once<sup>1</sup>
+| MSB | hex  | priority | frequency
+| --- | ---- | -------- | ---------
+| 00  | 0x0x | urgent   | 1 sec
+| 01  | 0x4x | normal   | 5 sec
+| 10  | 0x8x | low      | 61 sec
+| 11  | 0xcx | sporadic | once<sup>1</sup>
 
 <sup>1</sup> appears in every cycle for 1 minute after generated
 
@@ -35,10 +35,11 @@ One line of ascii7 text without space. Binary data can be base64 encoded. Maximu
 ### sensor input
 Local sensors can feed data to the system in one of two ways:
 - Writing a file to the "input" directory, where the filename should be the sensor type and instance and the content should be the measurements
-- Sending the measurement to the tcp input port to localhost (name, content)
   example: echo -n "00:02" >/var/run/tm_data/in/TI40
+- Sending the measurement to the tcp input port to localhost (name, content)
+  example: echo "#bTI4000:02" | socat - TCP:127.0.0.1:7699
 - Quit local instance with a "quit" message to the local input port
-  echo "quit"|socat - TCP:127.0.0.1:7699
+  echo "quit" | socat - TCP:127.0.0.1:7699
 
 ### misc
 
