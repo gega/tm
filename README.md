@@ -35,11 +35,11 @@ One line of ascii7 text without space. Binary data can be base64 encoded. Maximu
 ### sensor input
 Local sensors can feed data to the system in one of two ways:
 - Writing a file to the "input" directory, where the filename should be the sensor type and instance and the content should be the measurements
-  example: echo -n "00:02" >/var/run/tm_data/in/TI40
+  ```echo -n "00:02" >/var/run/tm_data/in/TI40```
 - Sending the measurement to the tcp input port to localhost (name, content)
-  example: echo "#bTI4000:02" | socat - TCP:127.0.0.1:7699
+  ```echo "#bTI4000:02" | socat - TCP:127.0.0.1:7699```
 - Quit local instance with a "quit" message to the local input port
-  echo "quit" | socat - TCP:127.0.0.1:7699
+  ```echo "quit" | socat - TCP:127.0.0.1:7699```
 
 ### misc
 
