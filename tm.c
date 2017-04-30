@@ -61,6 +61,9 @@
 #ifndef TM_LOG_IDENT
 #define TM_LOG_IDENT "tmd"
 #endif
+#ifndef TM_MAXERR
+#define TM_MAXERR 30                  // max udp send errors
+#endif
 
 // CONFIG AREA END
 
@@ -144,7 +147,7 @@ static int numhb=0;
 static gid_t gid;
 static uid_t uid;
 static time_t lasthb=0;
-
+static volatile int errcnt_udp=0;
 static int udp_input_sd=-1;
 static int udp_bus_sd=-1;
 static int tcp_local_sd=-1;
@@ -265,6 +268,7 @@ static int send_udp(char *addr, int port, char *msg, int len)
     else syslog(LOG_CRIT,"%s: cannot create socket\n",__func__);
   }
   else syslog(LOG_ERR,"%s: invalid input\n",__func__);
+  if(ret!=0) errcnt_udp++;
   
   return(ret);
 }
@@ -755,67 +759,75 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
       int ispnormal,isprare,pri;
       
       if(++numhb>=HBCNT_MAX) numhb=HBCNT_MAX;
-      ispnormal=numhb%FRQ_NORMAL;
-      isprare=numhb%FRQ_RARE;
-      updatepwr(pwr_self);
-      set_leader(GLDATA);
-      pdu[0]='+';
-      pdu[1]=PV;
-      pdu[2]='\0';
-      p=&pdu[2];
-      len=sizeof(pdu)-3;
-      now=time(NULL);
-      if(NULL!=(d=opendir(TM_DATADIR)))
+      if(errcnt_udp<TM_MAXERR)
       {
-        while((e=readdir(d)))
+        ispnormal=numhb%FRQ_NORMAL;
+        isprare=numhb%FRQ_RARE;
+        updatepwr(pwr_self);
+        set_leader(GLDATA);
+        pdu[0]='+';
+        pdu[1]=PV;
+        pdu[2]='\0';
+        p=&pdu[2];
+        len=sizeof(pdu)-3;
+        now=time(NULL);
+        if(NULL!=(d=opendir(TM_DATADIR)))
         {
-          if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
+          while((e=readdir(d)))
           {
-            strcpy(nam,TM_DATADIR);
-            strcat(nam,e->d_name);
-            if(len<IDLEN+4+1)
+            if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
             {
-              syslog(LOG_WARNING,"%s: buffer too small, skipping '%s'\n",__func__,e->d_name);
-              continue;
-            }
-            pri=getpri(e->d_name);
-            if(pri==P_NORMAL&&ispnormal!=0) continue;
-            if(pri==P_RARE&&isprare!=0) continue;
-            a=getfileage(nam,now);
-            // space
-            *p=' '; len--; *++p='\0';
-            // mod time
-            c=snprintf(age,sizeof(age),"%04x",a);
-            strcat(p,age);
-            len-=c; p+=c;
-            // basename
-            strncpy(p,e->d_name,IDLEN+4);
-            len-=IDLEN+4; p+=IDLEN+4; *p='\0';
-            // content
-            if(NULL!=(fp=fopen(nam,"rb")))
-            {
-              c=fread(p,1,(len<MAXDATA?len:MAXDATA),fp);
-              if(c>0)
+              strcpy(nam,TM_DATADIR);
+              strcat(nam,e->d_name);
+              if(len<IDLEN+4+1)
               {
-                len-=c;
-                p+=c;
-                *p='\0';
+                syslog(LOG_WARNING,"%s: buffer too small, skipping '%s'\n",__func__,e->d_name);
+                continue;
               }
-              else
+              pri=getpri(e->d_name);
+              if(pri==P_NORMAL&&ispnormal!=0) continue;
+              if(pri==P_RARE&&isprare!=0) continue;
+              a=getfileage(nam,now);
+              // space
+              *p=' '; len--; *++p='\0';
+              // mod time
+              c=snprintf(age,sizeof(age),"%04x",a);
+              strcat(p,age);
+              len-=c; p+=c;
+              // basename
+              strncpy(p,e->d_name,IDLEN+4);
+              len-=IDLEN+4; p+=IDLEN+4; *p='\0';
+              // content
+              if(NULL!=(fp=fopen(nam,"rb")))
               {
-                syslog(LOG_WARNING,"%s: read error '%s' skipped\n",__func__,e->d_name);
-                p-=IDLEN+4+4+1;
-                len+=IDLEN+4+4+1;
+                c=fread(p,1,(len<MAXDATA?len:MAXDATA),fp);
+                if(c>0)
+                {
+                  len-=c;
+                  p+=c;
+                  *p='\0';
+                }
+                else
+                {
+                  syslog(LOG_WARNING,"%s: read error '%s' skipped\n",__func__,e->d_name);
+                  p-=IDLEN+4+4+1;
+                  len+=IDLEN+4+4+1;
+                }
+                fclose(fp);
               }
-              fclose(fp);
+              else syslog(LOG_WARNING,"%s: file open error '%s'",__func__,e->d_name);
             }
-            else syslog(LOG_WARNING,"%s: file open error '%s'",__func__,e->d_name);
           }
+          closedir(d);
         }
-        closedir(d);
+        delete_old();
+        if(pdu[0]!='\0') sender_add(T_UDP,ADDR_BROADCAST,BUSPORT,pdu);
       }
-      delete_old();
-      if(pdu[0]!='\0') sender_add(T_UDP,ADDR_BROADCAST,BUSPORT,pdu);
+      else
+      {
+        syslog(LOG_ERR,"%s: err cnt > %d drop leadership",__func__,TM_MAXERR);
+        ev_break(EV_A_ EVBREAK_ONE);
+      }
     }
     else if(role==ROLE_READER)
     {
@@ -1470,9 +1482,9 @@ static void daemonize(void)     // from http://www.enderunix.org/documents/eng/d
  */
 int main(int argc, char **argv)
 {
-  int pfdss[2];
-  int pfdsf[2];
-  int bogo;
+  int pfdss[2]={0};
+  int pfdsf[2]={0};
+  int bogo=0;
   pthread_t pt;
   pthread_t ptf;
   char hostname[32]={0};
@@ -1609,8 +1621,8 @@ int main(int argc, char **argv)
   quit=0;
   while(quit==0)
   {
-
     syslog(LOG_NOTICE,"ROLE_READER\n");
+    numhb=0; updatepwr(pwr_self); // reset age counter
     heartbeat_watcher.repeat=READERHB/1000.0;
     ev_timer_again(loop,&heartbeat_watcher);
     role=ROLE_READER;
@@ -1638,6 +1650,7 @@ int main(int argc, char **argv)
     if(role!=ROLE_READER)
     {
       syslog(LOG_NOTICE,"ROLE_LEADER\n");
+      errcnt_udp=0;
       set_leader(GLDATA);
       role=ROLE_LEADER;
       init_tcp(&tcp_input_sd,loop,&tcp_input_watcher,INPUTPORT,read_tcp_input_cb);  // listen on tcp input port, remote sensor data from peers
