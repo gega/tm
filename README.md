@@ -66,6 +66,7 @@ Local sensors can feed data to the system in one of two ways:
 | UDP bus port     | 7697                | -
 | TCP fwd port     | 7698                | -
 | log ident string | tmd                 | TM_LOG_IDENT
+| error limit      | 30                  | TM_MAXERR
 
 
 ### Disclaimer
