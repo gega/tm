@@ -1634,6 +1634,7 @@ int main(int argc, char **argv)
 
     syslog(LOG_NOTICE,"ROLE_VOTER\n");
     updatepwr(pwr_self);
+    errcnt_udp=0;
     role=ROLE_VOTER;
     usleep((random()%VOTEHB)*1000);
     timeout_watcher.repeat=VOTETMO;
@@ -1647,7 +1648,7 @@ int main(int argc, char **argv)
 
     if(quit!=0) break;
 
-    if(role!=ROLE_READER)
+    if(role!=ROLE_READER&&errcnt_udp==0)
     {
       syslog(LOG_NOTICE,"ROLE_LEADER\n");
       errcnt_udp=0;
