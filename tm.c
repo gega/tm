@@ -118,6 +118,13 @@
 #define ROLE_VOTER  1
 #define ROLE_LEADER 2
 
+#if HEARTBEAT < VOTEHB
+  #error HEARTBEAT must be larger or equal than VOTEHB
+#endif
+
+#if READERHB < HEARTBEAT
+  #error READERHB must be larger or equal than HEARTBEAT
+#endif
 
 
 struct tcp_data
@@ -473,6 +480,7 @@ static void *file_thread(void *p)
       // parse timestamp, path and content
       n=&buf[2];
       ts=strtol(n,NULL,10);
+      nm=NULL;
       if(NULL!=(n=strchr(n,';')))
       {
         nm=++n;
@@ -498,7 +506,7 @@ static void *file_thread(void *p)
         else syslog(LOG_ERR,"missing length separator");
       }
       else syslog(LOG_ERR,"missing timestamp separator: ");
-      if(st!=0) syslog(LOG_WARNING,"st=%d",st);
+      if(st!=0) syslog(LOG_WARNING,"st=%d '%c' %s",st,buf[0],(nm==NULL?"null":nm));
     }
   }
   pthread_exit(NULL);
@@ -734,107 +742,113 @@ static void updatepwr(char *p)
 
 static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
 {
+  static time_t lasthb=0;
   char pdu[TM_BUFSIZE];
   char nam[sizeof(TM_DATADIR)+FNAMLEN];
   char age[]="0000";
   char *p;
   int c,len,a;
+  time_t now;
   
-  pdu[0]='\0';
-  if(pipew>0)
+  now=time(NULL);
+  if(difftime(lasthb,now)*1000<READERHB*5)
   {
-    if(role==ROLE_VOTER)
+    pdu[0]='\0';
+    if(pipew>0)
     {
-      // send voting request "?b<6PWR>,<8NODEID>,<?IP>"
-      snprintf(pdu,sizeof(pdu),"?%c%s,%s,%s",PV,pwr_self,nodeid,ip_self);
-      if(pdu[0]!='\0') sender_add(T_UDP,ADDR_BROADCAST,BUSPORT,pdu);
-    }
-    else if(role==ROLE_LEADER)
-    {
-      // send data to bus
-      time_t now;
-      FILE *fp;
-      DIR *d;
-      struct dirent *e;
-      int ispnormal,isprare,pri;
-      
-      if(++numhb>=HBCNT_MAX) numhb=HBCNT_MAX;
-      if(errcnt_udp<TM_MAXERR)
+      if(role==ROLE_VOTER)
       {
-        ispnormal=numhb%FRQ_NORMAL;
-        isprare=numhb%FRQ_RARE;
-        updatepwr(pwr_self);
-        set_leader(GLDATA);
-        pdu[0]='+';
-        pdu[1]=PV;
-        pdu[2]='\0';
-        p=&pdu[2];
-        len=sizeof(pdu)-3;
-        now=time(NULL);
-        if(NULL!=(d=opendir(TM_DATADIR)))
-        {
-          while((e=readdir(d)))
-          {
-            if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
-            {
-              strcpy(nam,TM_DATADIR);
-              strcat(nam,e->d_name);
-              if(len<IDLEN+4+1)
-              {
-                syslog(LOG_WARNING,"%s: buffer too small, skipping '%s'\n",__func__,e->d_name);
-                continue;
-              }
-              pri=getpri(e->d_name);
-              if(pri==P_NORMAL&&ispnormal!=0) continue;
-              if(pri==P_RARE&&isprare!=0) continue;
-              a=getfileage(nam,now);
-              // space
-              *p=' '; len--; *++p='\0';
-              // mod time
-              c=snprintf(age,sizeof(age),"%04x",a);
-              strcat(p,age);
-              len-=c; p+=c;
-              // basename
-              strncpy(p,e->d_name,IDLEN+4);
-              len-=IDLEN+4; p+=IDLEN+4; *p='\0';
-              // content
-              if(NULL!=(fp=fopen(nam,"rb")))
-              {
-                c=fread(p,1,(len<MAXDATA?len:MAXDATA),fp);
-                if(c>0)
-                {
-                  len-=c;
-                  p+=c;
-                  *p='\0';
-                }
-                else
-                {
-                  syslog(LOG_WARNING,"%s: read error '%s' skipped\n",__func__,e->d_name);
-                  p-=IDLEN+4+4+1;
-                  len+=IDLEN+4+4+1;
-                }
-                fclose(fp);
-              }
-              else syslog(LOG_WARNING,"%s: file open error '%s'",__func__,e->d_name);
-            }
-          }
-          closedir(d);
-        }
-        delete_old();
+        // send voting request "?b<6PWR>,<8NODEID>,<?IP>"
+        snprintf(pdu,sizeof(pdu),"?%c%s,%s,%s",PV,pwr_self,nodeid,ip_self);
         if(pdu[0]!='\0') sender_add(T_UDP,ADDR_BROADCAST,BUSPORT,pdu);
       }
-      else
+      else if(role==ROLE_LEADER)
       {
-        syslog(LOG_ERR,"%s: err cnt > %d drop leadership",__func__,TM_MAXERR);
-        ev_break(EV_A_ EVBREAK_ONE);
+        // send data to bus
+        FILE *fp;
+        DIR *d;
+        struct dirent *e;
+        int ispnormal,isprare,pri;
+        
+        if(++numhb>=HBCNT_MAX) numhb=HBCNT_MAX;
+        if(errcnt_udp<TM_MAXERR)
+        {
+          ispnormal=numhb%FRQ_NORMAL;
+          isprare=numhb%FRQ_RARE;
+          updatepwr(pwr_self);
+          set_leader(GLDATA);
+          pdu[0]='+';
+          pdu[1]=PV;
+          pdu[2]='\0';
+          p=&pdu[2];
+          len=sizeof(pdu)-3;
+          if(NULL!=(d=opendir(TM_DATADIR)))
+          {
+            while((e=readdir(d)))
+            {
+              if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=FNAMLEN)
+              {
+                strcpy(nam,TM_DATADIR);
+                strcat(nam,e->d_name);
+                if(len<IDLEN+4+1)
+                {
+                  syslog(LOG_WARNING,"%s: buffer too small, skipping '%s'\n",__func__,e->d_name);
+                  continue;
+                }
+                pri=getpri(e->d_name);
+                if(pri==P_NORMAL&&ispnormal!=0) continue;
+                if(pri==P_RARE&&isprare!=0) continue;
+                a=getfileage(nam,now);
+                // space
+                *p=' '; len--; *++p='\0';
+                // mod time
+                c=snprintf(age,sizeof(age),"%04x",a);
+                strcat(p,age);
+                len-=c; p+=c;
+                // basename
+                strncpy(p,e->d_name,IDLEN+4);
+                len-=IDLEN+4; p+=IDLEN+4; *p='\0';
+                // content
+                if(NULL!=(fp=fopen(nam,"rb")))
+                {
+                  c=fread(p,1,(len<MAXDATA?len:MAXDATA),fp);
+                  if(c>0)
+                  {
+                    len-=c;
+                    p+=c;
+                    *p='\0';
+                  }
+                  else
+                  {
+                    syslog(LOG_WARNING,"%s: read error '%s' skipped\n",__func__,e->d_name);
+                    p-=IDLEN+4+4+1;
+                    len+=IDLEN+4+4+1;
+                  }
+                  fclose(fp);
+                }
+                else syslog(LOG_WARNING,"%s: file open error '%s'",__func__,e->d_name);
+              }
+            }
+            closedir(d);
+          }
+          delete_old();
+          if(pdu[0]!='\0') sender_add(T_UDP,ADDR_BROADCAST,BUSPORT,pdu);
+        }
+        else
+        {
+          syslog(LOG_ERR,"%s: err cnt > %d drop leadership",__func__,TM_MAXERR);
+          ev_break(EV_A_ EVBREAK_ONE);
+        }
+      }
+      else if(role==ROLE_READER)
+      {
+        snprintf(pdu,sizeof(pdu),"#%c" HBDATA "%s",PV,ip_self);
+        sender_add(T_TCP,"127.0.0.1",LOCALPORT,pdu);
       }
     }
-    else if(role==ROLE_READER)
-    {
-      snprintf(pdu,sizeof(pdu),"#%c" HBDATA "%s",PV,ip_self);
-      sender_add(T_TCP,"127.0.0.1",LOCALPORT,pdu);
-    }
   }
+  else numhb=0;
+  lasthb=now;
 }
 
 
