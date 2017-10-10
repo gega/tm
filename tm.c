@@ -1,4 +1,5 @@
-// gcc -Wall -fno-strict-aliasing -static -s -Os -pthread -o tm tm.c -lev -lm
+// gcc -Wall -fno-strict-aliasing -static -s -Os -o tm tm.c -lev -lm
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -6,7 +7,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
-#include <pthread.h>
 #include <string.h>
 #include <ev.h>
 #include <errno.h>
@@ -22,6 +22,7 @@
 #include <limits.h>
 #include <net/if.h> 
 #include <sys/ioctl.h>
+#include <time.h>
 #ifdef __linux__
 #include <linux/limits.h>
 #include <linux/if_link.h>
@@ -35,7 +36,7 @@
 #endif
 #include <fts.h>
 #include <syslog.h>
-
+#include "coroutine.h"
 
 
 // CONFIG AREA BEGIN
@@ -159,12 +160,15 @@ static int udp_input_sd=-1;
 static int udp_bus_sd=-1;
 static int tcp_local_sd=-1;
 static int tcp_input_sd=-1;
+static ccrContext frc=0;
+static ccrContext src=0;
 
 static ev_io udp_input_watcher;
 static ev_io udp_bus_watcher;
 static ev_io tcp_local_watcher;
 static ev_io tcp_input_watcher;
-
+static ev_signal sigusr1_watcher;
+static ev_signal sigusr2_watcher;
 
 
 // Paul Larson hash
@@ -281,36 +285,51 @@ static int send_udp(char *addr, int port, char *msg, int len)
 }
 
 
-static int send_tcp(char *addr, int port, char *msg, int len)
-{
-  int ret=-1;
-  struct sockaddr_in si;
-  int s;
-  
-  if(NULL!=msg&&len>0&&NULL!=addr&&port>0&&port<0x8000)
-  {
-    if((s=socket(PF_INET,SOCK_STREAM,IPPROTO_TCP))>=0)
-    {
-      memset((char *)&si,0,sizeof(si));
-      si.sin_family=AF_INET;
-      si.sin_port=htons(port);
-      if(inet_aton(addr,&si.sin_addr)!=0)
-      {
-        if(connect(s,(struct sockaddr *)&si,sizeof(si))>=0)
-        {
-          if(send(s,msg,len,0)==len) ret=0;
-          close(s);
-        }
-        else syslog(LOG_WARNING,"%s: cannot connect to %s\n",__func__,addr);
-      }
-      else syslog(LOG_WARNING,"%s: aton failure %s:%d\n",__func__,addr,port);
-    }
-    else syslog(LOG_CRIT,"%s: cannot create socket\n",__func__);
-  }
-  else syslog(LOG_ERR,"%s: invalid input\n",__func__);
-  
-  return(ret);
-}
+#define send_tcp(ctx,addr,port,msg,len,s,r,ret) \
+do { \
+  struct sockaddr_in _si; \
+  \
+  *ret=-1; \
+  if(NULL!=msg&&len>0&&NULL!=addr&&port>0&&port<0x8000) \
+  { \
+    if((s=socket(PF_INET,SOCK_STREAM|SOCK_NONBLOCK,IPPROTO_TCP))>=0) \
+    { \
+      fcntl(s, F_SETOWN, getpid()); \
+      fcntl(s, F_SETSIG, SIGUSR2); \
+      fcntl(s, F_SETFL, fcntl(s,F_GETFL)|O_ASYNC); \
+      memset((char *)&_si,0,sizeof(_si)); \
+      _si.sin_family=AF_INET; \
+      _si.sin_port=htons(port); \
+      if(inet_aton(addr,&_si.sin_addr)!=0) \
+      { \
+        r=connect(s,(struct sockaddr *)&_si,sizeof(_si)); \
+        if(r==0||errno==EINPROGRESS||errno==EALREADY) \
+        { \
+          do { \
+            r=send(s,msg,len,0); \
+            if(r==len) *ret=0; \
+            else if(r==-1) \
+            { \
+              if(errno==EAGAIN||errno==EWOULDBLOCK) \
+              { \
+                errno=ctx->en; \
+                ccrReturnV; \
+                ctx->en=errno; \
+              } \
+              else r=len; \
+            } \
+          } while(r!=len); \
+          close(s); \
+        } \
+        else syslog(LOG_WARNING,"%s: cannot connect to %s errno: %d\n",__func__,addr,errno); \
+      } \
+      else syslog(LOG_WARNING,"%s: aton failure %s:%d\n",__func__,addr,port); \
+    } \
+    else syslog(LOG_CRIT,"%s: cannot create socket\n",__func__); \
+  } \
+  else syslog(LOG_ERR,"%s: invalid input\n",__func__); \
+  \
+} while(0)
 
 
 /*
@@ -328,56 +347,69 @@ static int send_tcp(char *addr, int port, char *msg, int len)
  * M - message: message to send (len bytes including zero if needed)
  *
  */
-static void *sender_thread(void *p)
+static void sender_coro(ccrContParam, int f)
 {
+  ccrBeginContext;
   char buf[SENDER_BUFSIZ+1];
-  int fd=(int)((long)p);
+  int fd,s,en,r;
   char *ip,*msg,*n;
-  int port,len,mode=0,l,st;
+  int port,len,l,st;
+  ccrEndContext(ctx);
 
-  setpriority(PRIO_PROCESS,0,PRI_SENDER);
-  drop_privileges(gid,uid);
+  ccrBegin(ctx);
+  ctx->en=0;
+  ctx->fd=f;
+
+  fcntl(ctx->fd, F_SETSIG, SIGUSR2);
+  fcntl(ctx->fd, F_SETOWN, getpid());
+  fcntl(ctx->fd, F_SETFL, fcntl(ctx->fd, F_GETFL)|O_ASYNC);
 
   while(1)
   {
-    st=1;
-    l=read(fd,buf,sizeof(buf));
-    if(l>=0) buf[l]='\0';
-    if(mode==0)
+    ctx->st=1;
+    ctx->en=errno;
+    ctx->l=read(ctx->fd,ctx->buf,sizeof(ctx->buf));
+    if(ctx->l!=-1)
     {
-      if(buf[0]=='q') break;
+      if(ctx->l>=0) ctx->buf[ctx->l]='\0';
+      if(ctx->buf[0]=='q') break;
       // parse addr, port, len
-      ip=&buf[2];
-      if(NULL!=(n=strchr(ip,';')))
+      ctx->ip=&ctx->buf[2];
+      if(NULL!=(ctx->n=strchr(ctx->ip,';')))
       {
-        *n='\0';
-        port=atoi(++n);
-        if(NULL!=(n=strchr(n,';')))
+        *ctx->n='\0';
+        ctx->port=atoi(++ctx->n);
+        if(NULL!=(ctx->n=strchr(ctx->n,';')))
         {
-          len=atoi(++n);
-          if(NULL!=(msg=strchr(n,';')))
+          ctx->len=atoi(++ctx->n);
+          if(NULL!=(ctx->msg=strchr(ctx->n,';')))
           {
-            msg++;
+            ctx->msg++;
             // TODO: implement the buffer allocation for longer messages
-            if(msg-buf+len<=l)
+            if(ctx->msg-ctx->buf+ctx->len<=ctx->l)
             {
-              if(buf[0]=='u') st=send_udp(ip,port,msg,len);
-              else if(buf[0]=='t') st=send_tcp(ip,port,msg,len);
-              else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
+              if(ctx->buf[0]=='u') ctx->st=send_udp(ctx->ip,ctx->port,ctx->msg,ctx->len);
+              else if(ctx->buf[0]=='t') send_tcp(ctx,ctx->ip,ctx->port,ctx->msg,ctx->len,ctx->s,ctx->r,&ctx->st);
+              else syslog(LOG_ERR,"unknown command char \"%c\": ",ctx->buf[0]);
             }
-            else syslog(LOG_WARNING,"too long message: %ld read only the first %d bytes: ",(long int)(msg-buf+len),l);
+            else syslog(LOG_WARNING,"too long message: %ld read only the first %d bytes: ",(long int)(ctx->msg-ctx->buf+ctx->len),ctx->l);
           }
           else syslog(LOG_ERR,"missing message separator: ");
         }
         else syslog(LOG_ERR,"missing length separator: ");
       }
       else syslog(LOG_ERR,"missing ip separator: ");
-      if(st!=0) syslog(LOG_WARNING,"st=%d '%s'\n",st,buf);
+      if(ctx->st!=0) syslog(LOG_WARNING,"st=%d '%s'\n",ctx->st,ctx->buf);
     }
+    else if(errno==EWOULDBLOCK||errno==EAGAIN)
+    {
+      errno=ctx->en;
+      ccrReturnV;
+    }
+    else syslog(LOG_ERR,"read error: %d\n",errno);
   }
-  pthread_exit(NULL);
 
-  return(NULL);
+  ccrFinishV;
 }
 
 
@@ -457,61 +489,89 @@ static int file_delete(const char *name)
  * c - content (can be empty)
  *
  */
-static void *file_thread(void *p)
+static void file_coro(ccrContParam, int f)
 {
-  char b[SENDER_BUFSIZ+1];
-  int fd=(int)((long)p);
   char *nm,*dt,*n,*buf;
-  int len,l,st;
+  int len,st;
   time_t ts;
   int q=0;
+  ccrBeginContext;
+  int fd;
+  int en;
+  int l;
+  char b[SENDER_BUFSIZ+1];
+  ccrEndContext(ctx);
 
-  setpriority(PRIO_PROCESS,0,PRI_FILE);
-  drop_privileges(gid,uid);
+  ccrBegin(ctx);
+  ctx->fd=f;
+
+  fcntl(ctx->fd, F_SETSIG, SIGUSR1);
+  fcntl(ctx->fd, F_SETOWN, getpid());
+  fcntl(ctx->fd, F_SETFL, fcntl(ctx->fd, F_GETFL)|O_ASYNC);
 
   while(q==0)
   {
-    l=read(fd,b,sizeof(b));
-    if(l>=0) b[l]='\0';
-    for(st=0,buf=b;st==0&&buf-b<l;)
+    ctx->en=errno;
+    ctx->l=read(ctx->fd,ctx->b,sizeof(ctx->b));
+    if(ctx->l!=-1)
     {
-      st=1;
-      if(buf[0]=='q') { q=1; break; }
-      // parse timestamp, path and content
-      n=&buf[2];
-      ts=strtol(n,NULL,10);
-      nm=NULL;
-      if(NULL!=(n=strchr(n,';')))
+      if(ctx->l>=0) ctx->b[ctx->l]='\0';
+      for(st=0,buf=ctx->b;st==0&&buf-ctx->b<ctx->l;)
       {
-        nm=++n;
+        st=1;
+        if(buf[0]=='q') { q=1; break; }
+        // parse timestamp, path and content
+        n=&buf[2];
+        ts=strtol(n,NULL,10);
+        nm=NULL;
         if(NULL!=(n=strchr(n,';')))
         {
-          *n++='\0';
-          len=atoi(n);
+          nm=++n;
           if(NULL!=(n=strchr(n,';')))
           {
-            dt=++n;
-            // TODO: implement the buffer allocation for longer messages
-            if(dt-buf+len<=l)
+            *n++='\0';
+            len=atoi(n);
+            if(NULL!=(n=strchr(n,';')))
             {
-              if(buf[0]=='c') st=file_create(nm,ts,dt);
-              else if(buf[0]=='d') st=file_delete(nm);
-              else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
-              buf=dt+len+1;
+              dt=++n;
+              // TODO: implement the buffer allocation for longer messages
+              if(dt-buf+len<=ctx->l)
+              {
+                if(buf[0]=='c') st=file_create(nm,ts,dt);
+                else if(buf[0]=='d') st=file_delete(nm);
+                else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
+                buf=dt+len+1;
+              }
+              else syslog(LOG_WARNING,"too long data: %ld read only the first %d bytes: ",(long int)(dt-buf+len),ctx->l);
             }
-            else syslog(LOG_WARNING,"too long data: %ld read only the first %d bytes: ",(long int)(dt-buf+len),l);
+            else syslog(LOG_ERR,"missing data separator: ");
           }
-          else syslog(LOG_ERR,"missing data separator");
+          else syslog(LOG_ERR,"missing length separator: ");
         }
-        else syslog(LOG_ERR,"missing length separator");
+        else syslog(LOG_ERR,"missing timestamp separator: ");
+        if(st!=0) syslog(LOG_WARNING,"st=%d '%c' %s",st,buf[0],(nm==NULL?"null":nm));
       }
-      else syslog(LOG_ERR,"missing timestamp separator: ");
-      if(st!=0) syslog(LOG_WARNING,"st=%d '%c' %s",st,buf[0],(nm==NULL?"null":nm));
     }
+    else if(errno==EWOULDBLOCK||errno==EAGAIN)
+    {
+      errno=ctx->en;
+      ccrReturnV;
+    }
+    else syslog(LOG_ERR,"read error: %d\n",errno);
   }
-  pthread_exit(NULL);
+  ccrFinishV;
+}
 
-  return(NULL);
+
+static void sigusr1_cb(struct ev_loop *loop, ev_signal *w, int revents)
+{
+  file_coro(&frc,0);
+}
+
+
+static void sigusr2_cb(struct ev_loop *loop, ev_signal *w, int revents)
+{
+  sender_coro(&src,0);
 }
 
 
@@ -560,6 +620,7 @@ static int file_create_add(int age, const char *dir, const char *name, const cha
       snprintf(b,blen,"c;%ld;%s%s;%ld;%s",time(NULL)-age,dir,name,(long int)dlen,data);
       len=strlen(b)+1;
       if(write(pipef,b,len)==len) ret=0;
+      //file_coro(&frc,0);
       if(b!=buf) free(b);
     }
   }
@@ -596,7 +657,7 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents)
   time_t now=time(NULL);
   if(difftime(now,lasthb)>WAKEUPLIMIT)
   {
-    syslog(LOG_NOTICE,"%s: wakeup limit, wait one more cycle",__func__);
+    syslog(LOG_NOTICE,"%s: wakeup limit, wait one more cycle\n",__func__);
     ev_timer_again(loop,&timeout_watcher);
     lasthb=now;
   }
@@ -826,7 +887,7 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
                   }
                   fclose(fp);
                 }
-                else syslog(LOG_WARNING,"%s: file open error '%s'",__func__,e->d_name);
+                else syslog(LOG_WARNING,"%s: file open error '%s'\n",__func__,e->d_name);
               }
             }
             closedir(d);
@@ -836,7 +897,7 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
         }
         else
         {
-          syslog(LOG_ERR,"%s: err cnt > %d drop leadership",__func__,TM_MAXERR);
+          syslog(LOG_ERR,"%s: err cnt > %d drop leadership\n",__func__,TM_MAXERR);
           ev_break(EV_A_ EVBREAK_ONE);
         }
       }
@@ -879,7 +940,7 @@ static void accept_tcp_cb(struct ev_loop *loop, struct ev_io *w, int revents)
         }
         else syslog(LOG_WARNING,"%s: invalid event\n",__func__);
       }
-      else syslog(LOG_WARNING,"%s: missing tcp_data field",__func__);
+      else syslog(LOG_WARNING,"%s: missing tcp_data field\n",__func__);
     }
     else syslog(LOG_WARNING,"%s: invalid watcher\n",__func__);
     if(st!=0) free(wc);
@@ -1191,7 +1252,7 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
       if(strncmp("quit",buf,4)==0)
       {
         quit=1;
-        syslog(LOG_NOTICE,"local quit request");
+        syslog(LOG_NOTICE,"local quit request\n");
         ev_break(EV_A_ EVBREAK_ONE);
       }
       else if(buf[0]=='#'&&buf[1]==PV)
@@ -1499,8 +1560,6 @@ int main(int argc, char **argv)
   int pfdss[2]={0};
   int pfdsf[2]={0};
   int bogo=0;
-  pthread_t pt;
-  pthread_t ptf;
   char hostname[32]={0};
   ev_stat finput;
   int o,dmn=0,machash;
@@ -1589,33 +1648,29 @@ int main(int argc, char **argv)
     exit(1);
   }
 
-  if(0!=pipe(pfdss))
+  if(0!=pipe2(pfdss,O_NONBLOCK))
   {
     fprintf(stderr,"pipe error 1\n");
     exit(1);
   }
   pipew=pfdss[1];
 
-  if(0!=pipe(pfdsf))
+  if(0!=pipe2(pfdsf,O_NONBLOCK))
   {
     fprintf(stderr,"pipe error 2\n");
     exit(1);
   }
   pipef=pfdsf[1];
-
+  
   loop=ev_default_loop(EVBACKEND_SELECT);
 
-  if(0!=(pthread_create(&pt,NULL,sender_thread,(void *)((long)pfdss[0]))))
-  {
-    fprintf(stderr,"error creating thread for network output!\n");
-    exit(1);
-  }
+  ev_signal_init(&sigusr2_watcher, sigusr2_cb, SIGUSR2);
+  ev_signal_start(loop, &sigusr2_watcher);
+  sender_coro(&src,pfdss[0]);
 
-  if(0!=(pthread_create(&ptf,NULL,file_thread,(void *)((long)pfdsf[0]))))
-  {
-    fprintf(stderr,"error creating thread for file io!\n");
-    exit(1);
-  }
+  ev_signal_init(&sigusr1_watcher, sigusr1_cb, SIGUSR1);
+  ev_signal_start(loop, &sigusr1_watcher);
+  file_coro(&frc,pfdsf[0]);
 
   setpriority(PRIO_PROCESS,0,PRI_EV);
   drop_privileges(gid,uid);
@@ -1675,10 +1730,12 @@ int main(int argc, char **argv)
   }
 
   if(write(pipew,"quit",5)<=0) syslog(LOG_WARNING,"write error\n");
-  pthread_join(pt,NULL);
+  sender_coro(&src,0);
+  ccrAbort(src);
 
   if(write(pipef,"quit",5)<=0) syslog(LOG_WARNING,"write error\n");
-  pthread_join(ptf,NULL);
+  file_coro(&frc,0);
+  ccrAbort(frc);
   
   close_udp(&udp_input_sd,loop,&udp_input_watcher);
   close_tcp(&tcp_input_sd,loop,&tcp_input_watcher);
