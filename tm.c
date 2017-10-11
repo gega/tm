@@ -198,29 +198,6 @@ static int getpri(const char *nam)
 }
 
 
-static int drop_privileges(gid_t gid, uid_t uid)
-{
-  int ret=0;
-  
-  if(getuid()==0)
-  {
-    prctl(PR_SET_KEEPCAPS,1,0,0,0);
-    if(setgid(gid)!=0)
-    {
-      syslog(LOG_ERR,"cannot set gid\n");
-      ret=-1;
-    }
-    if(setuid(uid)!=0)
-    {
-      syslog(LOG_ERR,"cannot set uid\n");
-      ret=-1;
-    }
-  }
-  
-  return(ret);
-}
-
-
 static void primary_ip(char *buffer, size_t buflen)
 {
   const char *dnsip="8.8.8.8";
@@ -1587,12 +1564,6 @@ int main(int argc, char **argv)
     }
   }
 
-  if(getuid()!=0)
-  {
-    fprintf(stderr,"run as root\n");
-    exit(1);
-  }
-
   if(dmn!=0) daemonize();
 
   openlog(TM_LOG_IDENT,LOG_PID|LOG_NOWAIT,LOG_USER);
@@ -1671,9 +1642,6 @@ int main(int argc, char **argv)
   ev_signal_init(&sigusr1_watcher, sigusr1_cb, SIGUSR1);
   ev_signal_start(loop, &sigusr1_watcher);
   file_coro(&frc,pfdsf[0]);
-
-  setpriority(PRIO_PROCESS,0,PRI_EV);
-  drop_privileges(gid,uid);
 
   init_tcp(&tcp_local_sd,loop,&tcp_local_watcher,LOCALPORT,read_tcp_local_cb);  // listen on local tcp input port for local sensor data
   init_udp(&udp_bus_sd,loop,&udp_bus_watcher,BUSPORT,udp_bus_cb);               // listen to broadcast udp bus
