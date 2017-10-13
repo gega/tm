@@ -1544,6 +1544,7 @@ int main(int argc, char **argv)
 
   uid=TM_DEFAULT_UID;
   gid=TM_DEFAULT_GID;
+  if(strncmp("tmd",argv[0],3)==0) dmn=1;
   while((o=getopt(argc,argv,"dhu:g:"))!=-1)
   {
     switch(o)
