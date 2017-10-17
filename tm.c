@@ -367,15 +367,15 @@ static void sender_coro(ccrContParam, int f)
             {
               if(ctx->buf[0]=='u') ctx->st=send_udp(ctx->ip,ctx->port,ctx->msg,ctx->len);
               else if(ctx->buf[0]=='t') send_tcp(ctx,ctx->ip,ctx->port,ctx->msg,ctx->len,ctx->s,ctx->r,&ctx->st);
-              else syslog(LOG_ERR,"unknown command char \"%c\": ",ctx->buf[0]);
+              else syslog(LOG_ERR,"%s() unknown command char \"%c\": ",__func__,ctx->buf[0]);
             }
-            else syslog(LOG_WARNING,"too long message: %ld read only the first %d bytes: ",(long int)(ctx->msg-ctx->buf+ctx->len),ctx->l);
+            else syslog(LOG_WARNING,"%s() too long message: %ld read only the first %d bytes: ",__func__,(long int)(ctx->msg-ctx->buf+ctx->len),ctx->l);
           }
-          else syslog(LOG_ERR,"missing message separator: ");
+          else syslog(LOG_ERR,"%s() missing message separator: ",__func__);
         }
-        else syslog(LOG_ERR,"missing length separator: ");
+        else syslog(LOG_ERR,"%s() missing length separator: ",__func__);
       }
-      else syslog(LOG_ERR,"missing ip separator: ");
+      else syslog(LOG_ERR,"%s() missing ip separator: ",__func__);
       if(ctx->st!=0) syslog(LOG_WARNING,"st=%d '%s'\n",ctx->st,ctx->buf);
     }
     else if(errno==EWOULDBLOCK||errno==EAGAIN)
@@ -383,7 +383,7 @@ static void sender_coro(ccrContParam, int f)
       errno=ctx->en;
       ccrReturnV;
     }
-    else syslog(LOG_ERR,"read error: %d\n",errno);
+    else syslog(LOG_ERR,"%s() read error: %d\n",__func__,errno);
   }
 
   ccrFinishV;
@@ -477,10 +477,12 @@ static void file_coro(ccrContParam, int f)
   int en;
   int l;
   char b[SENDER_BUFSIZ+1];
+  int o;
   ccrEndContext(ctx);
 
   ccrBegin(ctx);
   ctx->fd=f;
+  ctx->o=0;
 
   fcntl(ctx->fd, F_SETSIG, SIGUSR1);
   fcntl(ctx->fd, F_SETOWN, getpid());
@@ -489,13 +491,16 @@ static void file_coro(ccrContParam, int f)
   while(q==0)
   {
     ctx->en=errno;
-    ctx->l=read(ctx->fd,ctx->b,sizeof(ctx->b));
+    ctx->l=read(ctx->fd,ctx->b+ctx->o,sizeof(ctx->b)-ctx->o);
     if(ctx->l!=-1)
     {
-      if(ctx->l>=0) ctx->b[ctx->l]='\0';
+      char *an=NULL,*ze=NULL;
+      ctx->l+=ctx->o;
+      ctx->b[ctx->l]='\0';
       for(st=0,buf=ctx->b;st==0&&buf-ctx->b<ctx->l;)
       {
         st=1;
+        an=buf;
         if(buf[0]=='q') { q=1; break; }
         // parse timestamp, path and content
         n=&buf[2];
@@ -506,27 +511,38 @@ static void file_coro(ccrContParam, int f)
           nm=++n;
           if(NULL!=(n=strchr(n,';')))
           {
-            *n++='\0';
-            len=atoi(n);
+            *n='\0';
+            ze=n;
+            len=atoi(++n);
             if(NULL!=(n=strchr(n,';')))
             {
               dt=++n;
               // TODO: implement the buffer allocation for longer messages
               if(dt-buf+len<=ctx->l)
               {
-                if(buf[0]=='c') st=file_create(nm,ts,dt);
-                else if(buf[0]=='d') st=file_delete(nm);
-                else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
-                buf=dt+len+1;
+                if(len==strlen(dt))
+                {
+                  if(buf[0]=='c') st=file_create(nm,ts,dt);
+                  else if(buf[0]=='d') st=file_delete(nm);
+                  else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
+                  buf=dt+len+1;
+                  ctx->o=0;
+                }
+                // else: partial read
               }
-              else syslog(LOG_WARNING,"too long data: %ld read only the first %d bytes: ",(long int)(dt-buf+len),ctx->l);
+              else syslog(LOG_WARNING,"%s() too long data: %ld read only the first %d bytes: ",__func__,(long int)(dt-buf+len),ctx->l);
             }
-            else syslog(LOG_ERR,"missing data separator: ");
+            // else: missing data separator, probably partial read...
           }
-          else syslog(LOG_ERR,"missing length separator: ");
+          // else: missing length separator, probably partial read...
         }
-        else syslog(LOG_ERR,"missing timestamp separator: ");
-        if(st!=0) syslog(LOG_WARNING,"st=%d '%c' %s",st,buf[0],(nm==NULL?"null":nm));
+        // else: missing timestamp separator, probably partial read...
+        if(st!=0)
+        {
+          if(ze!=NULL) *ze=';';
+          ctx->o=ctx->l-(an-ctx->b);
+          memmove(ctx->b,an,ctx->o+1);
+        }
       }
     }
     else if(errno==EWOULDBLOCK||errno==EAGAIN)
@@ -534,7 +550,7 @@ static void file_coro(ccrContParam, int f)
       errno=ctx->en;
       ccrReturnV;
     }
-    else syslog(LOG_ERR,"read error: %d\n",errno);
+    else syslog(LOG_ERR,"%s() read error: %d\n",__func__,errno);
   }
   ccrFinishV;
 }
