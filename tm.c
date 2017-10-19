@@ -326,8 +326,8 @@ do { \
  */
 static void sender_coro(ccrContParam, int f)
 {
-  ccrBeginContext;
-  char buf[SENDER_BUFSIZ+1];
+  ccrBeginContext();
+  char buf[SENDER_BUFSIZ];
   int fd,s,en,r;
   char *ip,*msg,*n;
   int port,len,l,st;
@@ -472,11 +472,11 @@ static void file_coro(ccrContParam, int f)
   int len,st;
   time_t ts;
   int q=0;
-  ccrBeginContext;
+  ccrBeginContext();
   int fd;
   int en;
   int l;
-  char b[SENDER_BUFSIZ+1];
+  char b[SENDER_BUFSIZ];
   int o;
   ccrEndContext(ctx);
 
@@ -527,10 +527,16 @@ static void file_coro(ccrContParam, int f)
                   else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
                   buf=dt+len+1;
                   ctx->o=0;
+                  an=ctx->b+ctx->l;
                 }
                 // else: partial read
               }
-              else syslog(LOG_WARNING,"%s() too long data: %ld read only the first %d bytes: ",__func__,(long int)(dt-buf+len),ctx->l);
+              else
+              {
+                ctx->o=0;
+                an=ctx->b+ctx->l;
+                syslog(LOG_WARNING,"%s() too long data: %ld read only the first %d bytes: ",__func__,(long int)(dt-buf+len),ctx->l);
+              }
             }
             // else: missing data separator, probably partial read...
           }
