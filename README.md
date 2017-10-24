@@ -56,8 +56,6 @@ Local sensors can feed data to the system in one of two ways:
 | buffer size      | 4096                | TM_BUFSIZE
 | max data age     | 3600                | TM_MAXAGE
 | lockfile         | /var/lock/tm.lock   | TM_LOCKFILE
-| default uid      | 1000                | TM_DEFAULT_UID
-| default group    | uid                 | TM_DEFAULT_GID
 | max sensor data  | 256                 | -
 | sensor heartbeat | 5000 ms             | -
 | system heartbeat | 1000 ms             | -
