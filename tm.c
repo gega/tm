@@ -51,13 +51,7 @@
 #define TM_MAXAGE 3600                // data will be removed after TM_MAXAGE seconds if not refreshed
 #endif
 #ifndef TM_LOCKFILE
-#define TM_LOCKFILE "/var/lock/tm.lock"
-#endif
-#ifndef TM_DEFAULT_UID
-#define TM_DEFAULT_UID 1000
-#endif
-#ifndef TM_DEFAULT_GID
-#define TM_DEFAULT_GID TM_DEFAULT_UID
+#define TM_LOCKFILE "/tmp/tm.lock"
 #endif
 #ifndef TM_LOG_IDENT
 #define TM_LOG_IDENT "tmd"
@@ -152,8 +146,6 @@ static char prevleaderip[IPLEN+1];
 static int prevleaderpwr;
 static int quit=0;
 static int numhb=0;
-static gid_t gid;
-static uid_t uid;
 static time_t lasthb=0;
 static volatile int errcnt_udp=0;
 static int udp_input_sd=-1;
@@ -534,7 +526,7 @@ static void file_coro(ccrContParam, int f)
               else
               {
                 ctx->o=0;
-                an=ctx->b+ctx->l;
+                st=0;
                 syslog(LOG_WARNING,"%s() too long data: %ld read only the first %d bytes: ",__func__,(long int)(dt-buf+len),ctx->l);
               }
             }
@@ -1564,19 +1556,11 @@ int main(int argc, char **argv)
   int o,dmn=0,machash;
   mode_t m;
 
-  uid=TM_DEFAULT_UID;
-  gid=TM_DEFAULT_GID;
-  if(strncmp("tmd",argv[0],3)==0) dmn=1;
-  while((o=getopt(argc,argv,"dhu:g:"))!=-1)
+  if(strstr("tmd",argv[0])!=NULL) dmn=1;
+  while((o=getopt(argc,argv,"dh"))!=-1)
   {
     switch(o)
     {
-      case 'u':
-        uid=atoi(optarg);
-        break;
-      case 'g':
-        gid=atoi(optarg);
-        break;
       case 'd':
         dmn=1;
         break;
@@ -1610,11 +1594,6 @@ int main(int argc, char **argv)
       exit(1);
     }
   }
-  if(0!=chown(TM_DATADIR,uid,gid))
-  {
-    fprintf(stderr,"chown %d:%d %s failed\n",uid,gid,TM_DATADIR);
-    exit(1);
-  }
   if(access(INPUTDIR,R_OK|W_OK|X_OK)==-1)
   {
     if(0!=mkdir(INPUTDIR,0733))
@@ -1623,11 +1602,6 @@ int main(int argc, char **argv)
       exit(1);
     }
   }
-  if(0!=chown(INPUTDIR,uid,gid))
-  {
-    fprintf(stderr,"chown %d:%d %s failed\n",uid,gid,INPUTDIR);
-    exit(1);
-  }
   if(access(TMPDIR,R_OK|W_OK|X_OK)==-1)
   {
     if(0!=mkdir(TMPDIR,0700))
@@ -1635,11 +1609,6 @@ int main(int argc, char **argv)
       fprintf(stderr,"tmpdir '%s' missing and unable to create\n",TMPDIR);
       exit(1);
     }
-  }
-  if(0!=chown(TMPDIR,uid,gid))
-  {
-    fprintf(stderr,"chown %d:%d %s failed\n",uid,gid,TMPDIR);
-    exit(1);
   }
 
   if(0!=pipe2(pfdss,O_NONBLOCK))
