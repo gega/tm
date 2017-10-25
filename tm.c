@@ -374,9 +374,9 @@ static void sender_coro(ccrContParam, int f)
     ctx->st=1;
     ctx->en=errno;
     ctx->l=read(ctx->fd,ctx->buf,sizeof(ctx->buf));
-    if(ctx->l!=-1)
+    if(ctx->l!=-1&&ctx->l>0)
     {
-      if(ctx->l>=0) ctx->buf[ctx->l]='\0';
+      if(ctx->l>0) ctx->buf[ctx->l]='\0';
       if(ctx->buf[0]=='q') break;
       // parse addr, port, len
       ctx->ip=&ctx->buf[2];
@@ -406,7 +406,7 @@ static void sender_coro(ccrContParam, int f)
       else syslog(LOG_ERR,"%s() missing ip separator: ",__func__);
       if(ctx->st!=0) syslog(LOG_WARNING,"st=%d '%s'\n",ctx->st,ctx->buf);
     }
-    else if(errno==EWOULDBLOCK||errno==EAGAIN)
+    else if(errno==EWOULDBLOCK||errno==EAGAIN||ctx->l==0)
     {
       errno=ctx->en;
       ccrReturnV;
