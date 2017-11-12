@@ -58,6 +58,9 @@
 #ifndef TM_MAXERR
 #define TM_MAXERR 30                  // max udp send errors
 #endif
+#ifndef TM_DEBUG
+#undef TM_DEBUG
+#endif
 
 // CONFIG AREA END
 
@@ -67,7 +70,7 @@
 #define XSTR(s) STR(s)
 
 #define MAXDATA 256                   // maximum length of a data line
-#define SENDER_BUFSIZ 512             // sender thread buffer size
+#define SENDER_BUFSIZ 2048            // sender thread buffer size
 #define INPUTDIR TM_DATADIR "in/"
 #define TMPDIR TM_DATADIR "tmp/"
 #define TMPMASK TMPDIR "tmtmp.XXXXXX"
@@ -108,6 +111,12 @@
 #define P_URGENT   (0x00)
 #define PRIMASK    (0xc0)
 
+#ifdef TM_DEBUG
+  #define DBG(p...) syslog(LOG_INFO,p)
+#else
+  #define DBG(p...)
+#endif
+
 #define ROLE_READER 0
 #define ROLE_VOTER  1
 #define ROLE_LEADER 2
@@ -134,21 +143,21 @@
 #define ccrBegin(x)      if(!x) {x= *ccrParam=malloc(sizeof(*x)); x->ccrLine=0;}\
                          if (x) switch(x->ccrLine) { case 0:;
 #define ccrFinish(z)     } free(*ccrParam); *ccrParam=0; return (z)
-#define ccrFinishV       } free(*ccrParam); *ccrParam=0; return
+#define ccrFinishV()     } free(*ccrParam); *ccrParam=0; return
 
 #define ccrReturn(z)     \
         do {\
             ((struct ccrContextTag *)*ccrParam)->ccrLine=__LINE__;\
             return (z); case __LINE__:;\
         } while (0)
-#define ccrReturnV       \
+#define ccrReturnV()       \
         do {\
             ((struct ccrContextTag *)*ccrParam)->ccrLine=__LINE__;\
             return; case __LINE__:;\
         } while (0)
 
 #define ccrStop(z)       do{ free(*ccrParam); *ccrParam=0; return (z); }while(0)
-#define ccrStopV         do{ free(*ccrParam); *ccrParam=0; return; }while(0)
+#define ccrStopV()       do{ free(*ccrParam); *ccrParam=0; return; }while(0)
 
 #define ccrContext       void *
 #define ccrAbort(ctx)    do { free (ctx); ctx = 0; } while (0)
@@ -190,6 +199,8 @@ static int tcp_local_sd=-1;
 static int tcp_input_sd=-1;
 static ccrContext frc=0;
 static ccrContext src=0;
+static volatile int sender_coro_next=0;
+static volatile int file_coro_next=0;
 
 static ev_io udp_input_watcher;
 static ev_io udp_bus_watcher;
@@ -297,11 +308,11 @@ do { \
   *ret=-1; \
   if(NULL!=msg&&len>0&&NULL!=addr&&port>0&&port<0x8000) \
   { \
-    if((s=socket(PF_INET,SOCK_STREAM|SOCK_NONBLOCK,IPPROTO_TCP))>=0) \
+    if((s=socket(PF_INET,SOCK_STREAM,IPPROTO_TCP))>=0) \
     { \
       fcntl(s, F_SETOWN, getpid()); \
       fcntl(s, F_SETSIG, SIGUSR2); \
-      fcntl(s, F_SETFL, fcntl(s,F_GETFL)|O_ASYNC); \
+      fcntl(s, F_SETFL, fcntl(s,F_GETFL)|O_ASYNC|O_NONBLOCK); \
       memset((char *)&_si,0,sizeof(_si)); \
       _si.sin_family=AF_INET; \
       _si.sin_port=htons(port); \
@@ -317,18 +328,21 @@ do { \
             { \
               if(errno==EAGAIN||errno==EWOULDBLOCK) \
               { \
+                DBG("%s: connect() EWOULDBLOCK...\n","send_tcp"); \
                 errno=ctx->en; \
-                ccrReturnV; \
+                sender_coro_next=0; \
+                ccrReturnV(); \
                 ctx->en=errno; \
+                DBG("%s: connect() continue!\n","send_tcp"); \
               } \
               else r=len; \
             } \
           } while(r!=len); \
-          close(s); \
         } \
         else syslog(LOG_WARNING,"%s: cannot connect to %s errno: %d\n",__func__,addr,errno); \
       } \
       else syslog(LOG_WARNING,"%s: aton failure %s:%d\n",__func__,addr,port); \
+      close(s); \
     } \
     else syslog(LOG_CRIT,"%s: cannot create socket\n",__func__); \
   } \
@@ -365,7 +379,7 @@ static void sender_coro(ccrContParam, int f)
   ctx->en=0;
   ctx->fd=f;
 
-  fcntl(ctx->fd, F_SETSIG, SIGUSR2);
+  fcntl(ctx->fd, F_SETSIG, 0); // request SIGIO which is ignored
   fcntl(ctx->fd, F_SETOWN, getpid());
   fcntl(ctx->fd, F_SETFL, fcntl(ctx->fd, F_GETFL)|O_ASYNC);
 
@@ -393,9 +407,11 @@ static void sender_coro(ccrContParam, int f)
             // TODO: implement the buffer allocation for longer messages
             if(ctx->msg-ctx->buf+ctx->len<=ctx->l)
             {
+              DBG("%s() ==> %s:%d ==> '%s'",__func__,ctx->ip,ctx->port,ctx->msg);
               if(ctx->buf[0]=='u') ctx->st=send_udp(ctx->ip,ctx->port,ctx->msg,ctx->len);
               else if(ctx->buf[0]=='t') send_tcp(ctx,ctx->ip,ctx->port,ctx->msg,ctx->len,ctx->s,ctx->r,&ctx->st);
               else syslog(LOG_ERR,"%s() unknown command char \"%c\": ",__func__,ctx->buf[0]);
+              DBG("%s() <== send_%s done",__func__,ctx->buf[0]=='u'?"udp":"tcp");
             }
             else syslog(LOG_WARNING,"%s() too long message: %ld read only the first %d bytes: ",__func__,(long int)(ctx->msg-ctx->buf+ctx->len),ctx->l);
           }
@@ -408,13 +424,18 @@ static void sender_coro(ccrContParam, int f)
     }
     else if(errno==EWOULDBLOCK||errno==EAGAIN||ctx->l==0)
     {
+      DBG("%s() waiting for next message...",__func__);
+      fcntl(ctx->fd,F_SETSIG,SIGUSR2);
       errno=ctx->en;
-      ccrReturnV;
+      sender_coro_next=0;
+      ccrReturnV();
+      fcntl(ctx->fd,F_SETSIG,0);
+      DBG("%s() <<!something happened!",__func__);
     }
     else syslog(LOG_ERR,"%s() read error: %d\n",__func__,errno);
   }
 
-  ccrFinishV;
+  ccrFinishV();
 }
 
 
@@ -582,23 +603,24 @@ static void file_coro(ccrContParam, int f)
     else if(errno==EWOULDBLOCK||errno==EAGAIN)
     {
       errno=ctx->en;
-      ccrReturnV;
+      file_coro_next=0;
+      ccrReturnV();
     }
     else syslog(LOG_ERR,"%s() read error: %d\n",__func__,errno);
   }
-  ccrFinishV;
+  ccrFinishV();
 }
 
 
 static void sigusr1_cb(struct ev_loop *loop, ev_signal *w, int revents)
 {
-  file_coro(&frc,0);
+  if(++file_coro_next==1) file_coro(&frc,0);
 }
 
 
 static void sigusr2_cb(struct ev_loop *loop, ev_signal *w, int revents)
 {
-  sender_coro(&src,0);
+  if(++sender_coro_next==1) sender_coro(&src,0);
 }
 
 
@@ -621,6 +643,7 @@ static int sender_add(char type, char *addr, int port, char *msg)
       else n[0]='\n';
       snprintf(b,blen,"%c;%s;%d;%ld;%s%s",type,addr,port,(long int)mlen+(n[0]=='\0'?0:1),msg,n);
       len=strlen(b)+1;
+      DBG("%s() --> '%s'",__func__,b);
       if(write(pipew,b,len)==len) ret=0;
       if(b!=buf) free(b);
     }
@@ -1127,7 +1150,7 @@ static void udp_input_cb(struct ev_loop *loop, ev_io *w, int revents)
         pr=getrank(&buf[2]);
         if(ps<pr)
         {
-          syslog(LOG_NOTICE,"rank self %d < rank %.8s=%d, voting lost\n",ps,&buf[2+PWRLEN+1],pr);
+          DBG("rank self %d < rank %.8s=%d, voting lost\n",ps,&buf[2+PWRLEN+1],pr);
           role=ROLE_READER;
           ev_break(EV_A_ EVBREAK_ONE);
         }
@@ -1212,7 +1235,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
           char wtfip[IPLEN+1];
           if(prevleaderpwr<leaderpwr)
           {
-            syslog(LOG_NOTICE,"rank %d > other leader %s=%d, sending WTF\n",leaderpwr,leaderid,prevleaderpwr);
+            DBG("rank %d > other leader %s=%d, sending WTF\n",leaderpwr,leaderid,prevleaderpwr);
             strcpy(wtfip,leaderip);
             strcpy(leaderip,ip_self);
             strcpy(leaderid,nodeid);
@@ -1220,7 +1243,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
           }
           else
           {
-            syslog(LOG_NOTICE,"rank %d < new leader %s=%d, switch to reader\n",leaderpwr,leaderid,prevleaderpwr);
+            DBG("rank %d < new leader %s=%d, switch to reader\n",leaderpwr,leaderid,prevleaderpwr);
             ev_break(EV_A_ EVBREAK_ONE); // switch roles
           }
         }
@@ -1602,7 +1625,7 @@ int main(int argc, char **argv)
         break;
       case 'h':
       default:
-        fprintf(stderr,"semi-realtime telemetry\n(c) Gergely Gati 2017 AGPL\nusage: %s [-d] [-u uid] [-g gid]\n",argv[0]);
+        fprintf(stderr,"semi-realtime telemetry\n(c) Gergely Gati 2017 AGPL\nusage: %s [-d]\n",argv[0]);
         exit(0);
     }
   }
@@ -1620,6 +1643,18 @@ int main(int argc, char **argv)
   if(gethostname(hostname,sizeof(hostname)-1)==0) strncat(nodeid,hostname,4);
   else strncat("NONE",hostname,4);
   srandom(getmachash()+hash(ip_self,7)+time(NULL));
+
+  {
+    struct sigaction sa;
+    sigfillset(&sa.sa_mask);
+    sa.sa_handler=SIG_IGN;
+    sa.sa_flags=0;
+    if(0!=sigaction(SIGIO,&sa,NULL))
+    {
+      syslog(LOG_ERR,"cannot ignore SIGIO");
+      exit(1);
+    }
+  }
 
   m=umask(0);
   if(access(TM_DATADIR,R_OK|W_OK|X_OK)==-1)
@@ -1647,16 +1682,36 @@ int main(int argc, char **argv)
     }
   }
 
-  if(0!=pipe2(pfdss,O_NONBLOCK))
+  if(0!=pipe(pfdss))
   {
     fprintf(stderr,"pipe error 1\n");
     exit(1);
   }
+  if(-1==fcntl(pfdss[0],F_SETFL,fcntl(pfdss[0],F_GETFL,0)|O_NONBLOCK))
+  {
+    fprintf(stderr,"fcntl pfdss[0] O_NONBLOCK failed\n");
+    exit(1);
+  }
+  if(-1==fcntl(pfdss[1],F_SETFL,fcntl(pfdss[1],F_GETFL,0)|O_NONBLOCK))
+  {
+    fprintf(stderr,"fcntl pfdss[1] O_NONBLOCK failed\n");
+    exit(1);
+  }
   pipew=pfdss[1];
 
-  if(0!=pipe2(pfdsf,O_NONBLOCK))
+  if(0!=pipe(pfdsf))
   {
     fprintf(stderr,"pipe error 2\n");
+    exit(1);
+  }
+  if(-1==fcntl(pfdsf[0],F_SETFL,fcntl(pfdsf[0],F_GETFL,0)|O_NONBLOCK))
+  {
+    fprintf(stderr,"fcntl pfdsf[0] O_NONBLOCK failed\n");
+    exit(1);
+  }
+  if(-1==fcntl(pfdsf[1],F_SETFL,fcntl(pfdsf[1],F_GETFL,0)|O_NONBLOCK))
+  {
+    fprintf(stderr,"fcntl pfdsf[1] O_NONBLOCK failed\n");
     exit(1);
   }
   pipef=pfdsf[1];
