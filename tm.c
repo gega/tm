@@ -1189,7 +1189,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
           {
             // double leaders, send WTF to the weaker
             char wtfip[IPLEN+1];
-            if(prevleaderpwr>leaderpwr) strcpy(wtfip,prevleaderip);
+            if(prevleaderpwr<leaderpwr) strcpy(wtfip,prevleaderip);
             else strcpy(wtfip,leaderip);
             sender_add(T_TCP,wtfip,INPUTPORT,WTFMSG);
           }
@@ -1233,7 +1233,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
         {
           // duplicated leaders detected, if we are the weaker, switch roles, otherwise send WTF
           char wtfip[IPLEN+1];
-          if(prevleaderpwr<leaderpwr)
+          if(prevleaderpwr>leaderpwr)
           {
             DBG("rank %d > other leader %s=%d, sending WTF\n",leaderpwr,leaderid,prevleaderpwr);
             strcpy(wtfip,leaderip);
