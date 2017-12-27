@@ -573,7 +573,7 @@ static int file_create(int age, const char *dir, const char *name, const char *d
   if(NULL!=name&&NULL!=dir&&NULL!=data)
   {
     if(snprintf(fn,sizeof(fn),"%s%s",dir,name)<sizeof(fn)) ret=write_file(age,fn,data);
-    else syslog(LOG_ERR,"%s() path buffer too small (%ld)",__func__,sizeof(fn));
+    else syslog(LOG_ERR,"%s() path buffer too small",__func__);
   }
   else syslog(LOG_ERR,"%s() internal error %d",__func__,__LINE__);
 
