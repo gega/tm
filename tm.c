@@ -1,4 +1,9 @@
 // gcc -Wall -fno-strict-aliasing -static -s -Os -o tm tm.c -lev -lm
+//
+// copyright 2017 Gergely Gati
+//
+// github.com/gega/tm
+//
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +41,8 @@
 #endif
 #include <fts.h>
 #include <syslog.h>
+#include <strings.h>
+#include <math.h>
 
 
 // CONFIG AREA BEGIN
@@ -70,7 +77,7 @@
 #define XSTR(s) STR(s)
 
 #define MAXDATA 256                   // maximum length of a data line
-#define SENDER_BUFSIZ 2048            // sender thread buffer size
+#define SENDER_BUFSIZ 300             // sender thread buffer size
 #define INPUTDIR TM_DATADIR "in/"
 #define TMPDIR TM_DATADIR "tmp/"
 #define TMPMASK TMPDIR "tmtmp.XXXXXX"
@@ -110,6 +117,9 @@
 #define P_NORMAL   (0x40)
 #define P_URGENT   (0x00)
 #define PRIMASK    (0xc0)
+
+#define DIGITS(a) (floor(log10(abs((a))))+1)
+
 
 #ifdef TM_DEBUG
   #define DBG(p...) syslog(LOG_INFO,p)
@@ -167,6 +177,69 @@
  */
 
 
+
+/* -------------------------------------------------------------------
+ * mmfl.h copyright 2017 Gergely Gati
+ *
+ * https://github.com/gega/mmfl
+ */
+
+typedef struct rb_s
+{
+  int bp;
+  int bsiz;
+  int fd;
+  char *buf;
+  char *ep;
+  long mlen;
+  char zero;
+} rb_t;
+
+/*
+ * message format on wire:
+ *   "11 hello world2 ok"
+ *    msg1          msg2
+ * len <space> message
+ */
+
+#define rb_init(r,b,s,f) do { bzero((r),sizeof(struct rb_s)); (r)->buf=(b); (r)->bsiz=(s); (r)->mlen=-1; (r)->fd=(f); } while(0)
+
+#define rb_readmsg(rs,rt,ln,rd) \
+do { \
+  if((rs)->mlen>=0) { \
+    memmove((rs)->buf,&(rs)->buf[(rs)->mlen],(rs)->bp-(rs)->mlen); \
+    (rs)->buf[0]=(rs)->zero; \
+    (rs)->bp-=(rs)->mlen; \
+    (rs)->mlen=-1; \
+  } \
+  while(1) { \
+    if((rs)->mlen<0) { \
+      if(memchr((rs)->buf,' ',(rs)->bp)!=NULL) { \
+        (rs)->mlen=strtol((rs)->buf,&(rs)->ep,10); \
+        (ln)=(rs)->mlen; \
+        (rs)->mlen+=(rs)->ep-(rs)->buf+1; \
+      } else { (ln)=-1; } \
+    } \
+    if((rs)->mlen<0||(rs)->bp<(rs)->mlen) { \
+      int len=(rd)((rs)->fd,&(rs)->buf[(rs)->bp],((rs)->bsiz-(rs)->bp)); \
+      if(len<=0) { (rt)=NULL; (ln)=len; break; } \
+      (rs)->bp+=len; \
+    } \
+    else if((rs)->mlen>=0&&(rs)->bp>=(rs)->mlen) { \
+      (rs)->zero=(rs)->buf[(rs)->mlen]; \
+      (rs)->buf[(rs)->mlen]='\0'; \
+      (rt)=(rs)->ep+1; \
+      break; \
+    } \
+  } \
+} while(0)
+
+/* -------------------------------------------------------------------
+ * mmfl.h copyright 2017 Gergely Gati
+ */
+ 
+
+
 struct tcp_data
 {
   void (*cb)(EV_P_ ev_io *,int);
@@ -178,7 +251,6 @@ static ev_timer timeout_watcher;
 static ev_timer heartbeat_watcher;
 static struct ev_loop *loop;
 static int pipew=-1;
-static int pipef=-1;
 static int role=ROLE_READER;
 static char nodeid[IDLEN+1]="0000host";   // <POWER><HOSTNAME> (8bytes)
 static char ip_self[IPLEN+1];             // own ip address facing to default gateway
@@ -197,17 +269,14 @@ static int udp_input_sd=-1;
 static int udp_bus_sd=-1;
 static int tcp_local_sd=-1;
 static int tcp_input_sd=-1;
-static ccrContext frc=0;
 static ccrContext src=0;
 static volatile int sender_coro_next=0;
-static volatile int file_coro_next=0;
 
 static ev_io udp_input_watcher;
 static ev_io udp_bus_watcher;
 static ev_io tcp_local_watcher;
 static ev_io tcp_input_watcher;
 static ev_signal sigusr1_watcher;
-static ev_signal sigusr2_watcher;
 
 
 // Paul Larson hash
@@ -311,7 +380,7 @@ do { \
     if((s=socket(PF_INET,SOCK_STREAM,IPPROTO_TCP))>=0) \
     { \
       fcntl(s, F_SETOWN, getpid()); \
-      fcntl(s, F_SETSIG, SIGUSR2); \
+      fcntl(s, F_SETSIG, SIGUSR1); \
       fcntl(s, F_SETFL, fcntl(s,F_GETFL)|O_ASYNC|O_NONBLOCK); \
       memset((char *)&_si,0,sizeof(_si)); \
       _si.sin_family=AF_INET; \
@@ -328,18 +397,16 @@ do { \
             { \
               if(errno==EAGAIN||errno==EWOULDBLOCK) \
               { \
-                DBG("%s: connect() EWOULDBLOCK...\n","send_tcp"); \
                 errno=ctx->en; \
                 sender_coro_next=0; \
                 ccrReturnV(); \
                 ctx->en=errno; \
-                DBG("%s: connect() continue!\n","send_tcp"); \
               } \
               else r=len; \
             } \
           } while(r!=len); \
         } \
-        else syslog(LOG_WARNING,"%s: cannot connect to %s errno: %d\n",__func__,addr,errno); \
+        else syslog(LOG_WARNING,"%s: cannot connect to %s errno: %d: '%s'\n",__func__,addr,errno,strerror(errno)); \
       } \
       else syslog(LOG_WARNING,"%s: aton failure %s:%d\n",__func__,addr,port); \
       close(s); \
@@ -354,83 +421,66 @@ do { \
 /*
  * sender protocol:
  *
- * u;192.168.1.12;112;7;Message
- * T A            P   L M
+ * u192.168.1.12 112 Message
+ * TA            P   M
  *
- * T - type: u: udp
- *           t: tcp
- *           q: quit (no other data required)
- * A - addr: ip address in decimal notation
- * P - port: decimal
- * L - len: message length
- * M - message: message to send (len bytes including zero if needed)
+ * T - 1   type: u: udp
+ *               t: tcp
+ *               q: quit (no other data required)
+ * A - 15  addr: ip address in decimal notation
+ * P - 5   port: decimal
+ * M - 256 message: message to send (len bytes including zero if needed)
  *
+ * max message len: 1+15+5+256+2sep = 279
  */
 static void sender_coro(ccrContParam, int f)
 {
+  char cmd;
+  int rd;
   ccrBeginContext();
   char buf[SENDER_BUFSIZ];
+  char *bp;
   int fd,s,en,r;
-  char *ip,*msg,*n;
+  char ip[16],*msg,*n;
   int port,len,l,st;
+  rb_t rbv;
   ccrEndContext(ctx);
 
   ccrBegin(ctx);
   ctx->en=0;
   ctx->fd=f;
+  ctx->bp=ctx->buf;
+  rb_init(&ctx->rbv,ctx->buf,sizeof(ctx->buf),ctx->fd);
 
   fcntl(ctx->fd, F_SETSIG, 0); // request SIGIO which is ignored
   fcntl(ctx->fd, F_SETOWN, getpid());
   fcntl(ctx->fd, F_SETFL, fcntl(ctx->fd, F_GETFL)|O_ASYNC);
-
+  
   while(1)
   {
     ctx->st=1;
     ctx->en=errno;
-    ctx->l=read(ctx->fd,ctx->buf,sizeof(ctx->buf));
-    if(ctx->l!=-1&&ctx->l>0)
+    
+    rb_readmsg(&ctx->rbv,ctx->msg,ctx->l,read);
+    if(ctx->l>0)
     {
-      if(ctx->l>0) ctx->buf[ctx->l]='\0';
-      if(ctx->buf[0]=='q') break;
-      // parse addr, port, len
-      ctx->ip=&ctx->buf[2];
-      if(NULL!=(ctx->n=strchr(ctx->ip,';')))
-      {
-        *ctx->n='\0';
-        ctx->port=atoi(++ctx->n);
-        if(NULL!=(ctx->n=strchr(ctx->n,';')))
-        {
-          ctx->len=atoi(++ctx->n);
-          if(NULL!=(ctx->msg=strchr(ctx->n,';')))
-          {
-            ctx->msg++;
-            // TODO: implement the buffer allocation for longer messages
-            if(ctx->msg-ctx->buf+ctx->len<=ctx->l)
-            {
-              DBG("%s() ==> %s:%d ==> '%s'",__func__,ctx->ip,ctx->port,ctx->msg);
-              if(ctx->buf[0]=='u') ctx->st=send_udp(ctx->ip,ctx->port,ctx->msg,ctx->len);
-              else if(ctx->buf[0]=='t') send_tcp(ctx,ctx->ip,ctx->port,ctx->msg,ctx->len,ctx->s,ctx->r,&ctx->st);
-              else syslog(LOG_ERR,"%s() unknown command char \"%c\": ",__func__,ctx->buf[0]);
-              DBG("%s() <== send_%s done",__func__,ctx->buf[0]=='u'?"udp":"tcp");
-            }
-            else syslog(LOG_WARNING,"%s() too long message: %ld read only the first %d bytes: ",__func__,(long int)(ctx->msg-ctx->buf+ctx->len),ctx->l);
-          }
-          else syslog(LOG_ERR,"%s() missing message separator: ",__func__);
-        }
-        else syslog(LOG_ERR,"%s() missing length separator: ",__func__);
-      }
-      else syslog(LOG_ERR,"%s() missing ip separator: ",__func__);
+      if(ctx->msg[0]=='q') break;
+      // parse addr, port
+      sscanf(ctx->msg,"%c%15s %d%n",&cmd,ctx->ip,&ctx->port,&rd);
+      ctx->msg+=++rd;
+      ctx->len=ctx->l-rd;
+      if(cmd=='u') ctx->st=send_udp(ctx->ip,ctx->port,ctx->msg,ctx->len);
+      else if(cmd=='t') send_tcp(ctx,ctx->ip,ctx->port,ctx->msg,ctx->len,ctx->s,ctx->r,&ctx->st);
+      else syslog(LOG_ERR,"%s() unknown command char \"%c\": ",__func__,cmd);
       if(ctx->st!=0) syslog(LOG_WARNING,"st=%d '%s'\n",ctx->st,ctx->buf);
     }
     else if(errno==EWOULDBLOCK||errno==EAGAIN||ctx->l==0)
     {
-      DBG("%s() waiting for next message...",__func__);
-      fcntl(ctx->fd,F_SETSIG,SIGUSR2);
+      fcntl(ctx->fd,F_SETSIG,SIGUSR1);
       errno=ctx->en;
       sender_coro_next=0;
       ccrReturnV();
       fcntl(ctx->fd,F_SETSIG,0);
-      DBG("%s() <<!something happened!",__func__);
     }
     else syslog(LOG_ERR,"%s() read error: %d\n",__func__,errno);
   }
@@ -480,145 +530,7 @@ static int write_file(int age, const char *name, const char *str)
 }
 
 
-static int file_create(const char *name, time_t timestamp, const char *data)
-{
-  int ret=-1;
-  
-  if(NULL!=name&&data!=NULL) ret=write_file(time(NULL)-timestamp,name,data);
-  
-  return(ret);
-}
-
-
-static int file_delete(const char *name)
-{
-  int ret=-1;
-  
-  if(name) ret=unlink(name);
-  
-  return(ret);
-}
-
-
-/*
- * file io protocol:
- *
- * c;1491024061;/tmp/tm_data/TC00ff33hurk;len;content...
- * t m          p                         l   c
- *
- * t - type: c: create
- *           d: delete
- *           q: quit
- * m - last modification time (0 for deletion)
- * p - path (cannot contain ';')
- * l - data length
- * c - content (can be empty)
- *
- */
-static void file_coro(ccrContParam, int f)
-{
-  char *nm,*dt,*n,*buf;
-  int len,st;
-  time_t ts;
-  int q=0;
-  ccrBeginContext();
-  int fd;
-  int en;
-  int l;
-  char b[SENDER_BUFSIZ];
-  int o;
-  ccrEndContext(ctx);
-
-  ccrBegin(ctx);
-  ctx->fd=f;
-  ctx->o=0;
-
-  fcntl(ctx->fd, F_SETSIG, SIGUSR1);
-  fcntl(ctx->fd, F_SETOWN, getpid());
-  fcntl(ctx->fd, F_SETFL, fcntl(ctx->fd, F_GETFL)|O_ASYNC);
-
-  while(q==0)
-  {
-    ctx->en=errno;
-    ctx->l=read(ctx->fd,ctx->b+ctx->o,sizeof(ctx->b)-ctx->o);
-    if(ctx->l!=-1)
-    {
-      char *an=NULL,*ze=NULL;
-      ctx->l+=ctx->o;
-      ctx->b[ctx->l]='\0';
-      for(st=0,buf=ctx->b;st==0&&buf-ctx->b<ctx->l;)
-      {
-        st=1;
-        an=buf;
-        if(buf[0]=='q') { q=1; break; }
-        // parse timestamp, path and content
-        n=&buf[2];
-        ts=strtol(n,NULL,10);
-        nm=NULL;
-        if(NULL!=(n=strchr(n,';')))
-        {
-          nm=++n;
-          if(NULL!=(n=strchr(n,';')))
-          {
-            *n='\0';
-            ze=n;
-            len=atoi(++n);
-            if(NULL!=(n=strchr(n,';')))
-            {
-              dt=++n;
-              // TODO: implement the buffer allocation for longer messages
-              if(dt-buf+len<=ctx->l)
-              {
-                if(len==strlen(dt))
-                {
-                  if(buf[0]=='c') st=file_create(nm,ts,dt);
-                  else if(buf[0]=='d') st=file_delete(nm);
-                  else syslog(LOG_ERR,"unknown command char \"%c\": ",buf[0]);
-                  buf=dt+len+1;
-                  ctx->o=0;
-                  an=ctx->b+ctx->l;
-                }
-                // else: partial read
-              }
-              else
-              {
-                ctx->o=0;
-                st=0;
-                syslog(LOG_WARNING,"%s() too long data: %ld read only the first %d bytes: ",__func__,(long int)(dt-buf+len),ctx->l);
-              }
-            }
-            // else: missing data separator, probably partial read...
-          }
-          // else: missing length separator, probably partial read...
-        }
-        // else: missing timestamp separator, probably partial read...
-        if(st!=0)
-        {
-          if(ze!=NULL) *ze=';';
-          ctx->o=ctx->l-(an-ctx->b);
-          memmove(ctx->b,an,ctx->o+1);
-        }
-      }
-    }
-    else if(errno==EWOULDBLOCK||errno==EAGAIN)
-    {
-      errno=ctx->en;
-      file_coro_next=0;
-      ccrReturnV();
-    }
-    else syslog(LOG_ERR,"%s() read error: %d\n",__func__,errno);
-  }
-  ccrFinishV();
-}
-
-
 static void sigusr1_cb(struct ev_loop *loop, ev_signal *w, int revents)
-{
-  if(++file_coro_next==1) file_coro(&frc,0);
-}
-
-
-static void sigusr2_cb(struct ev_loop *loop, ev_signal *w, int revents)
 {
   if(++sender_coro_next==1) sender_coro(&src,0);
 }
@@ -627,24 +539,24 @@ static void sigusr2_cb(struct ev_loop *loop, ev_signal *w, int revents)
 // request sending something to somewhere, schedule the request using the pipe which read by the sender thread
 static int sender_add(char type, char *addr, int port, char *msg)
 {
+  static char maxint[]="-" XSTR(INT_MAX);
   int ret=-1;
   char buf[MAXDATA*10];
-  char *b=buf;              // u;192.168.1.12;112;7;Message
-  char n[]="\n";
-  int blen,len,mlen;
+  char *b=buf;              // 27 u192.168.1.12 112 Message
+  int blen,len,mlen,d;
   
   if(pipew>0&&addr!=NULL&&port>0&&port<0x8000&&NULL!=msg)
   {
     mlen=strlen(msg);
-    blen=strlen(addr)+5+mlen+5+5+2;
+    //   T+Address     +s+Port        +s+Msg +\n
+    blen=1+strlen(addr)+1+DIGITS(port)+1+mlen+1;
+    d=1+sizeof(maxint);
+    blen+=d;
     if(blen<sizeof(buf)||NULL!=(b=malloc(blen)))
     {
-      if(msg[mlen-1]=='\n') n[0]='\0';
-      else n[0]='\n';
-      snprintf(b,blen,"%c;%s;%d;%ld;%s%s",type,addr,port,(long int)mlen+(n[0]=='\0'?0:1),msg,n);
-      len=strlen(b)+1;
-      DBG("%s() --> '%s'",__func__,b);
+      len=snprintf(b,blen,"%d %c%s %d %s\n",blen-d,type,addr,port,msg);
       if(write(pipew,b,len)==len) ret=0;
+      else syslog(LOG_ERR,"%s() write error: %d\n",__func__,errno);
       if(b!=buf) free(b);
     }
   }
@@ -653,51 +565,28 @@ static int sender_add(char type, char *addr, int port, char *msg)
 }
 
 
-// request creating/deleting file, schedule the request using the pipe which read by the file thread
-static int file_create_add(int age, const char *dir, const char *name, const char *data)
+static int file_create(int age, const char *dir, const char *name, const char *data)
 {
   int ret=-1;
-  char buf[250];
-  char *b=buf;               	// c;1491024061;/tmp/tm_data/TC00ff33hurk;len;content...
-  int blen,len,dlen;
+  char fn[sizeof(TM_DATADIR)*2+sizeof(GLDATA)+1];
   
-  if(pipef>0&&name!=NULL&&NULL!=data)
+  if(NULL!=name&&NULL!=dir&&NULL!=data)
   {
-    dlen=strlen(data);
-    blen=strlen(dir)+1+strlen(name)+4+dlen+20+20+2;
-    if(blen<sizeof(buf)||NULL!=(b=malloc(blen)))
-    {
-      snprintf(b,blen,"c;%ld;%s%s;%ld;%s",time(NULL)-age,dir,name,(long int)dlen,data);
-      len=strlen(b)+1;
-      if(write(pipef,b,len)==len) ret=0;
-      //file_coro(&frc,0);
-      if(b!=buf) free(b);
-    }
+    if(snprintf(fn,sizeof(fn),"%s%s",dir,name)<sizeof(fn)) ret=write_file(age,fn,data);
+    else syslog(LOG_ERR,"%s() path buffer too small (%ld)",__func__,sizeof(fn));
   }
-  
+  else syslog(LOG_ERR,"%s() internal error %d",__func__,__LINE__);
+
   return(ret);
 }
 
 
-static int file_delete_add(const char *name)
+static int file_delete(const char *name)
 {
   int ret=-1;
-  char buf[250];
-  char *b=buf;              // d;0;/tmp/tm_data/TC00ff33hurk;0;
-  int blen,len;
-  
-  if(pipef>0&&name!=NULL)
-  {
-    blen=strlen(name)+4+3+1;
-    if(blen<sizeof(buf)||NULL!=(b=malloc(blen)))
-    {
-      snprintf(b,blen,"d;0;%s;0;",name);
-      len=strlen(b)+1;
-      if(write(pipef,b,len)==len) ret=0;
-      if(b!=buf) free(b);
-    }
-  }
-  
+
+  if(name) ret=unlink(name);
+
   return(ret);
 }
 
@@ -761,7 +650,7 @@ static void set_leader(char *nam)
   {
     // 6634ff,ff6abana,10.0.1.7
     snprintf(str,sizeof(str),"%s,%s,%s",pwr_self,nodeid,ip_self);
-    file_create_add(0,TM_DATADIR,nam,str);
+    file_create(0,TM_DATADIR,nam,str);
   }
   leaderpwr=getrank(pwr_self);
   strcpy(leaderip,ip_self);
@@ -833,7 +722,7 @@ static int delete_old(void)
         strcpy(nam,TM_DATADIR);
         strcat(nam,e->d_name);
         a=getfileage(nam,now);
-        if(a>TM_MAXAGE||(getpri(e->d_name)==P_SPORADIC&&a>SPORADIC_AGE)) file_delete_add(nam);
+        if(a>TM_MAXAGE||(getpri(e->d_name)==P_SPORADIC&&a>SPORADIC_AGE)) file_delete(nam);
       }
     }
     closedir(d);
@@ -1082,7 +971,7 @@ static int process_item(char *s, int dry)
     strncpy(n,&s[4],12);
     n[12]='\0';
     d=&s[16];
-    if(!dry) file_create_add(age,TM_DATADIR,n,d);
+    if(!dry) file_create(age,TM_DATADIR,n,d);
     ret=0;
     if(strcmp(n,GLDATA)==0)
     {
@@ -1351,7 +1240,8 @@ static void input_dir_cb(struct ev_loop *loop, struct ev_stat *w, int revents)
             if(len>0)
             {
               buf[len]='\0';
-              if(0==forward_sensor_input(e->d_name,buf)) file_delete_add(nam);
+              DBG("%s() fwd %s: '%s'",__func__,e->d_name,buf);
+              if(0==forward_sensor_input(e->d_name,buf)) file_delete(nam);
             }
           }
         }
@@ -1714,23 +1604,18 @@ int main(int argc, char **argv)
     fprintf(stderr,"fcntl pfdsf[1] O_NONBLOCK failed\n");
     exit(1);
   }
-  pipef=pfdsf[1];
   
   loop=ev_default_loop(EVBACKEND_SELECT);
 
-  ev_signal_init(&sigusr2_watcher, sigusr2_cb, SIGUSR2);
-  ev_signal_start(loop, &sigusr2_watcher);
-  sender_coro(&src,pfdss[0]);
-
   ev_signal_init(&sigusr1_watcher, sigusr1_cb, SIGUSR1);
   ev_signal_start(loop, &sigusr1_watcher);
-  file_coro(&frc,pfdsf[0]);
+  sender_coro(&src,pfdss[0]);
 
   init_tcp(&tcp_local_sd,loop,&tcp_local_watcher,LOCALPORT,read_tcp_local_cb);  // listen on local tcp input port for local sensor data
   init_udp(&udp_bus_sd,loop,&udp_bus_watcher,BUSPORT,udp_bus_cb);               // listen to broadcast udp bus
   init_udp(&udp_input_sd,loop,&udp_input_watcher,INPUTPORT,udp_input_cb);       // listen udp input port for voting <-- maybe remove and move to bus?
   
-  ev_stat_init(&finput,input_dir_cb,INPUTDIR,0.);
+  ev_stat_init(&finput,input_dir_cb,INPUTDIR,1.0);
   ev_stat_start(loop,&finput);
 
   ev_init(&timeout_watcher,timeout_cb);
@@ -1784,10 +1669,6 @@ int main(int argc, char **argv)
   sender_coro(&src,0);
   ccrAbort(src);
 
-  if(write(pipef,"quit",5)<=0) syslog(LOG_WARNING,"write error\n");
-  file_coro(&frc,0);
-  ccrAbort(frc);
-  
   close_udp(&udp_input_sd,loop,&udp_input_watcher);
   close_tcp(&tcp_input_sd,loop,&tcp_input_watcher);
   close_tcp(&tcp_local_sd,loop,&tcp_local_watcher);
@@ -1798,3 +1679,4 @@ int main(int argc, char **argv)
 
   return(0);
 }
+
