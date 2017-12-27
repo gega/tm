@@ -77,7 +77,7 @@
 #define XSTR(s) STR(s)
 
 #define MAXDATA 256                   // maximum length of a data line
-#define SENDER_BUFSIZ 300             // sender thread buffer size
+#define SENDER_BUFSIZ 4096            // sender thread buffer size
 #define INPUTDIR TM_DATADIR "in/"
 #define TMPDIR TM_DATADIR "tmp/"
 #define TMPMASK TMPDIR "tmtmp.XXXXXX"
@@ -122,7 +122,8 @@
 
 
 #ifdef TM_DEBUG
-  #define DBG(p...) syslog(LOG_INFO,p)
+  ///#define DBG(p...) syslog(LOG_INFO,p)
+  #define DBG(p...) do { printf( p ); printf("\n"); }while(0)
 #else
   #define DBG(p...)
 #endif
@@ -207,6 +208,7 @@ typedef struct rb_s
 #define rb_readmsg(rs,rt,ln,rd) \
 do { \
   if((rs)->mlen>=0) { \
+    DBG("rb_readmsg() memmove mlen=%ld siz=%ld bp=%d",(rs)->mlen,(rs)->bp-(rs)->mlen,(rs)->bp); \
     memmove((rs)->buf,&(rs)->buf[(rs)->mlen],(rs)->bp-(rs)->mlen); \
     (rs)->buf[0]=(rs)->zero; \
     (rs)->bp-=(rs)->mlen; \
@@ -469,6 +471,7 @@ static void sender_coro(ccrContParam, int f)
       sscanf(ctx->msg,"%c%15s %d%n",&cmd,ctx->ip,&ctx->port,&rd);
       ctx->msg+=++rd;
       ctx->len=ctx->l-rd;
+      DBG("%s() len=%d rd=%d ip=%s port=%d msg='%s'",__func__,ctx->len,rd,ctx->ip,ctx->port,ctx->msg);
       if(cmd=='u') ctx->st=send_udp(ctx->ip,ctx->port,ctx->msg,ctx->len);
       else if(cmd=='t') send_tcp(ctx,ctx->ip,ctx->port,ctx->msg,ctx->len,ctx->s,ctx->r,&ctx->st);
       else syslog(LOG_ERR,"%s() unknown command char \"%c\": ",__func__,cmd);
