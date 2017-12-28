@@ -645,6 +645,70 @@ static int getrank(const char *pwr)
 }
 
 
+static int forward_sensor_input(const char *nam, const char *buf)
+{
+  int ret=-1;
+  char fwdip[IPLEN+1];
+  int mlen;
+  char b[MAXDATA+FNAMLEN+3+4+1+1];
+  char *msg=b;
+  const char *n;
+  
+  if(NULL!=buf&&NULL!=nam&&leaderip[0]!='\0')
+  {
+    if(strcmp(leaderip,ip_self)==0) strcpy(fwdip,"127.0.0.1");
+    else strcpy(fwdip,leaderip);
+    mlen=strlen(buf)+strlen(nam)+3+4+IDLEN+1+1;
+    if(mlen<sizeof(b)||NULL!=(msg=malloc(mlen)))
+    {
+      if(buf[2]==GL_1&&buf[3]==GL_2) n=GLOBALID;
+      else n=nodeid;
+      snprintf(msg,mlen,"+%c 0000%s%s%s",PV,nam,n,buf);
+      ret=sender_add(T_TCP,fwdip,INPUTPORT,msg);
+      if(msg!=b) free(msg);
+    }
+  }
+    
+  return(ret);
+}
+
+
+static void rescan_dir(void)
+{
+  DIR *d;
+  struct dirent *e;
+  char nam[sizeof(INPUTDIR)+SNLEN];
+  char buf[TM_BUFSIZE];
+  int len;
+  FILE *f;
+
+  // scan dir for files, process and delete them
+  if(NULL!=(d=opendir(INPUTDIR)))
+  {
+    while((e=readdir(d)))
+    {
+      if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=SNLEN)
+      {
+        strcpy(nam,INPUTDIR);
+        strcat(nam,e->d_name);
+        if(NULL!=(f=fopen(nam,"rb")))
+        {
+          len=fread(buf,1,sizeof(buf),f);
+          fclose(f);
+          if(len>0)
+          {
+            buf[len]='\0';
+            DBG("%s() fwd %s: '%s'",__func__,e->d_name,buf);
+            if(0==forward_sensor_input(e->d_name,buf)) file_delete(nam);
+          }
+        }
+      }
+    }
+    closedir(d);
+  }
+}
+
+
 static void set_leader(char *nam)
 {
   char str[PWRLEN+IDLEN+IPLEN+2+1];
@@ -658,7 +722,7 @@ static void set_leader(char *nam)
   leaderpwr=getrank(pwr_self);
   strcpy(leaderip,ip_self);
   strcpy(leaderid,nodeid);
-  
+  rescan_dir();
 }
 
 
@@ -996,6 +1060,7 @@ static int process_item(char *s, int dry)
             strcpy(prevleaderid,leaderid);
             strcpy(leaderip,ip);
             strcpy(leaderid,lid);
+            if(prevleaderip[0]=='\0') rescan_dir();
           }
         }
       }
@@ -1132,6 +1197,7 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
             strcpy(leaderip,ip_self);
             strcpy(leaderid,nodeid);
             sender_add(T_TCP,wtfip,INPUTPORT,WTFMSG);
+            rescan_dir();
           }
           else
           {
@@ -1143,33 +1209,6 @@ static void udp_bus_cb(struct ev_loop *loop, ev_io *w, int revents)
       // ignore everything else as leader
     }
   }
-}
-
-
-static int forward_sensor_input(const char *nam, const char *buf)
-{
-  int ret=-1;
-  char fwdip[IPLEN+1];
-  int mlen;
-  char *msg;
-  const char *n;
-  
-  if(NULL!=buf&&NULL!=nam)
-  {
-    if(strcmp(leaderip,ip_self)==0) strcpy(fwdip,"127.0.0.1");
-    else strcpy(fwdip,leaderip);
-    mlen=strlen(buf)+strlen(nam)+3+4+IDLEN+1+1;
-    if(NULL!=(msg=malloc(mlen)))
-    {
-      if(buf[2]==GL_1&&buf[3]==GL_2) n=GLOBALID;
-      else n=nodeid;
-      snprintf(msg,mlen,"+%c 0000%s%s%s",PV,nam,n,buf);
-      ret=sender_add(T_TCP,fwdip,INPUTPORT,msg);
-      free(msg);
-    }
-  }
-    
-  return(ret);
 }
 
 
@@ -1200,7 +1239,7 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
       else if(buf[0]=='#'&&buf[1]==PV)
       {
         strncpy(sn,&buf[2],SNLEN);
-        forward_sensor_input(sn,&buf[6]);
+        if(0!=forward_sensor_input(sn,&buf[6])) file_create(0,TM_DATADIR,sn,&buf[6]);
       }
     }
     else if(len<0) syslog(LOG_WARNING,"read error\n");
@@ -1218,40 +1257,7 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
 
 static void input_dir_cb(struct ev_loop *loop, struct ev_stat *w, int revents)
 {
-  DIR *d;
-  struct dirent *e;
-  char nam[sizeof(INPUTDIR)+SNLEN];
-  char buf[TM_BUFSIZE];
-  int len;
-  FILE *f;
-
-  if(!(EV_ERROR&revents)&&w->attr.st_nlink)
-  {
-    // scan dir for files, process and delete them
-    if(NULL!=(d=opendir(INPUTDIR)))
-    {
-      while((e=readdir(d)))
-      {
-        if((DT_REG==e->d_type||DT_UNKNOWN==e->d_type)&&e->d_name[0]!='.'&&strlen(e->d_name)<=SNLEN)
-        {
-          strcpy(nam,INPUTDIR);
-          strcat(nam,e->d_name);
-          if(NULL!=(f=fopen(nam,"rb")))
-          {
-            len=fread(buf,1,sizeof(buf),f);
-            fclose(f);
-            if(len>0)
-            {
-              buf[len]='\0';
-              DBG("%s() fwd %s: '%s'",__func__,e->d_name,buf);
-              if(0==forward_sensor_input(e->d_name,buf)) file_delete(nam);
-            }
-          }
-        }
-      }
-      closedir(d);
-    }
-  }
+  if(!(EV_ERROR&revents)&&w->attr.st_nlink) rescan_dir();
 }
 
 
