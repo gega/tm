@@ -50,8 +50,8 @@ Local sensors can feed data to the system in one of two ways:
 
 | name             | value               | config
 | ---------------- | ------------------- | ---------
-| data directory   | /var/run/tm_data    | TM_DATADIR
-| input directory  | /var/run/tm_data/in | -
+| data directory   | /tmp/tm_data        | TM_DATADIR
+| input directory  | /tmp/tm_data/in     | -
 | local input port | 7699                | -
 | buffer size      | 4096                | TM_BUFSIZE
 | max data age     | 3600                | TM_MAXAGE
