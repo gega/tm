@@ -273,6 +273,7 @@ static int tcp_local_sd=-1;
 static int tcp_input_sd=-1;
 static ccrContext src=0;
 static volatile int sender_coro_next=0;
+static int scan_input=0;
 
 static ev_io udp_input_watcher;
 static ev_io udp_bus_watcher;
@@ -705,6 +706,7 @@ static void rescan_dir(void)
       }
     }
     closedir(d);
+    scan_input=0;
   }
 }
 
@@ -912,6 +914,7 @@ static void heartbeat_cb(EV_P_ ev_timer *w, int revents)
         snprintf(pdu,sizeof(pdu),"#%c" HBDATA "%s",PV,ip_self);
         sender_add(T_TCP,"127.0.0.1",LOCALPORT,pdu);
       }
+      if(scan_input) rescan_dir();
     }
   }
   else numhb=0;
@@ -1258,6 +1261,7 @@ static void read_tcp_local_cb(struct ev_loop *loop, struct ev_io *w, int revents
 static void input_dir_cb(struct ev_loop *loop, struct ev_stat *w, int revents)
 {
   if(!(EV_ERROR&revents)&&w->attr.st_nlink) rescan_dir();
+  scan_input=1;
 }
 
 
