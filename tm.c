@@ -1,6 +1,6 @@
-// gcc -Wall -fno-strict-aliasing -static -s -Os -o tm tm.c -lev -lm
+//usr/bin/gcc -Wall -fno-strict-aliasing -static -s -O2 -o tm tm.c -lev -lm
 //
-// copyright 2017 Gergely Gati
+// copyright 2017-2018 Gergely Gati
 //
 // github.com/gega/tm
 //
