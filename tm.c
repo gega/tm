@@ -51,7 +51,7 @@
 #define TM_BUFSIZE 4096               // bufsize (must be > MAXDATA )
 #endif
 #ifndef TM_DATADIR
-#define TM_DATADIR "/var/run/tm_data/"
+#define TM_DATADIR "/tmp/tm_data/"
 #endif
 #ifndef TM_MAXAGE
 #define TM_MAXAGE 3600                // data will be removed after TM_MAXAGE seconds if not refreshed
