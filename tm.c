@@ -734,7 +734,7 @@ static int init_udp(int *sd, struct ev_loop *l, ev_io *w, int port, void (*cb)(E
   struct sockaddr_in addr;
   const int enable=1;
   
-  if(sd!=NULL&&loop!=NULL&&w!=NULL&&cb!=NULL&&port>0&&port<0x8000)
+  if(sd!=NULL&&l!=NULL&&w!=NULL&&cb!=NULL&&port>0&&port<0x8000)
   {
     *sd=socket(PF_INET,SOCK_DGRAM,0);
     if(setsockopt(*sd,SOL_SOCKET,SO_REUSEADDR,&enable,sizeof(int))>=0)
